@@ -75,7 +75,9 @@ struct DebugOverlay: View {
                 row("torque", r.torqueOn.map { "\($0)/16 on" } ?? "–")
                 if let h = r.hottest { row("hottest", "\(h.joint) \(Int(h.celsius)) °C") }
             }
-            row("heard", link.lastHeard ?? "–")
+            row("ears", link.earsState)
+            row("phone heard", link.phoneHeard ?? "–")
+            row("agent heard", link.lastHeard ?? "–")
             row("said", link.lastSaid ?? "–")
             row("requests", "\(link.requestsServed)")
             if let e = link.lastError { row("error", e) }

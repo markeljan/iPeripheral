@@ -1,6 +1,6 @@
 # iPeripheral — iPhone 14 Pro Max as Tony's mounted senses
 
-Status: 2026-10-29. P0 done; P1 and P4 senses working against a fake robot on the Mac; nothing deployed to the Pi yet
+Status: 2026-10-29. P0 done; P1, P3 voice and P4 senses working against a fake robot on the Mac; nothing deployed to the Pi yet
 (waiting for M1 to merge).
 Decisions: **mounted peripheral only** (no handheld remote UI) · **free Apple ID** signing · **Pi bridge lives in this repo**.
 
@@ -89,7 +89,8 @@ and without the phone; read tilt from tonyd. Adjust the stand pose if it leans (
 Power: battery pack, or USB from the Pi (5 A board budget, check `vcgencmd get_throttled`).
 *Done when:* Tony walks 5 steps and gets up from its back with the phone on, no falls in 5 tries.
 
-**P3 — Voice.** On-device wake phrase + `SpeechAnalyzer`/`SFSpeechRecognizer` STT → `agent.sock`; `phone_say`
+**P3 — Voice. [SpeechAnalyzer ears, "Tony …" wake word, local stop/freeze, skill vocabulary + snapping, transcripts
+logged by the bridge: working against the fake agent with Mac TTS through a speaker; not yet measured at 3 m]** On-device wake phrase + `SpeechAnalyzer`/`SFSpeechRecognizer` STT → `agent.sock`; `phone_say`
 (AVSpeech or Piper audio from the Pi); face lip-sync. Compare WER and latency against the Pi's zipformer and
 LFM3-Audio on the same recorded commands. *Done when:* "hey Tony, wave" works from 3 m in a normal room, 9/10 times.
 

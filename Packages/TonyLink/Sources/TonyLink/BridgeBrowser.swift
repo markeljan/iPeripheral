@@ -56,7 +56,7 @@ public enum BridgeBrowser {
 }
 
 /// Resumes a continuation at most once, from any thread.
-private final class Once<T: Sendable>: @unchecked Sendable {
+final class Once<T: Sendable>: @unchecked Sendable {
     private var cont: CheckedContinuation<T, Never>?
     private let lock = NSLock()
 

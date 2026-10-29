@@ -7,7 +7,8 @@ mic) and face. Read
 ## Layout
 - `App/` SwiftUI app "Tony Eyes" (`org.example.iperipheral`, iOS 18+, Swift 6). `PeripheralLink.swift` is the core:
   connection loop, pairing, answering bridge requests. `Senses.swift` is one ARKit session (camera image + LiDAR depth +
-  pose + Vision). Tap on the face = stop the body.
+  pose + Vision); `Ears.swift` is on-device speech (iOS 26 SpeechAnalyzer), and `Listener` in TonyLink turns transcripts
+  into stop / wake / command. Tap on the face = stop the body.
 - `Packages/TonyLink/` protocol types + WebSocket client + Bonjour browser. `cd Packages/TonyLink && swift test`.
 - `bridge/` Python package `tonypi-phone` that runs on the Pi (WS :8766 on the LAN, MCP on 127.0.0.1:8767).
   `cd bridge && uv run pytest` (fake tonyd/agent sockets, no robot needed).
@@ -32,7 +33,9 @@ mic) and face. Read
 `/tmp/tpdev`) and advertises it over Bonjour, so the real phone connects to the Mac exactly as it would to the Pi.
 Skip spoken pairing with `APP_ARGS="-devToken $(scripts/dev-bridge.sh --token)" scripts/build-and-install.sh` (Debug
 only; tokens in `build/dev-tokens.json`). Needs the sandbox off (it listens on the LAN). Stop the dev bridge before
-testing against the Pi, or the phone may pick the Mac.
+testing against the Pi, or the phone may pick the Mac. Voice can be tested hands-free: `say -v Samantha "Hey Tony, wave"`
+near the phone, then `grep "phone heard\|command:" build/dev-bridge.log`. Simulator: `-bridgeURL ws://127.0.0.1:8766/`
+(no ARKit or mic there). Two devices with tokens fight over the one phone slot; run one at a time.
 
 ## Device
 - iPhone 14 Pro Max (iPhone15,3), iOS 27.0.1, UDID `YOUR_DEVICE_ID`, wired. Free Personal Team `GG7SNY5A85`:

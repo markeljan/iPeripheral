@@ -12,6 +12,8 @@ public enum Incoming: Sendable, Equatable {
     case robotEvent(JSONValue)
     case agentEvent(JSONValue)
     case request(rid: Int, op: String, args: [String: JSONValue])
+    /// Words and phrases for speech recognition to favour (the robot's skill names).
+    case vocabulary([String])
     case unknown(type: String)
 
     public init(json data: Data) throws {
@@ -36,6 +38,8 @@ public enum Incoming: Sendable, Equatable {
             self = .robotEvent(o["event"] ?? .null)
         case "agent_event":
             self = .agentEvent(o["event"] ?? .null)
+        case "vocabulary":
+            self = .vocabulary(o["words"]?.array?.compactMap(\.string) ?? [])
         case "request":
             var args = o
             args["type"] = nil
@@ -55,6 +59,8 @@ public enum Outgoing: Sendable, Equatable {
     case pairConfirm(code: String)
     case stop
     case command(text: String)
+    /// A finished phrase the phone's ears heard, whatever it was (for logs and tuning the wake word).
+    case transcript(text: String)
     case status(PhoneStatus)
     case reply(rid: Int, ok: Bool, error: String? = nil, fields: [String: JSONValue] = [:])
 
@@ -73,6 +79,8 @@ public enum Outgoing: Sendable, Equatable {
             return ["type": "stop"]
         case .command(let text):
             return ["type": "command", "text": .string(text)]
+        case .transcript(let text):
+            return ["type": "transcript", "text": .string(text)]
         case .status(let s):
             var o = s.object
             o["type"] = "status"

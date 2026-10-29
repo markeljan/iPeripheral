@@ -37,7 +37,8 @@ The bridge stores only a SHA-256 of each token (`~/.config/tonypi-phone/tokens.j
 | type | fields | effect |
 |---|---|---|
 | `stop` | | `tonyd stop` immediately (face tap). Never waits on anything else. |
-| `command` | `text` | sends the text to the agent, same as `tonypi-chat` (voice transcripts from the phone) |
+| `command` | `text` | sends the text to the agent, same as `tonypi-chat`. The phone sends what follows "Tony …" (on-device SpeechAnalyzer, iOS 26+); "stop"/"freeze"/"halt" heard anywhere sends `stop` instead, with no wake word and no LLM |
+| `transcript` | `text` | every finished phrase the phone heard (logged by the bridge; for tuning, not acted on) |
 | `status` | `battery` 0–1, `charging`, `thermal` (`nominal/fair/serious/critical`), `caps` [..] | phone health, every ~5 s |
 | `reply` | `rid`, `ok`, `error?`, … | answer to a bridge `request` (binary frame when it carries a blob) |
 
@@ -47,6 +48,7 @@ The bridge stores only a SHA-256 of each token (`~/.config/tonypi-phone/tokens.j
 | `robot_state` | `state` (tonyd `state` dict) | every ~1 s while connected |
 | `robot_event` | `event` (tonyd event: `job` or `warn`) | as they happen |
 | `agent_event` | `event` (agent event: `heard`, `say`, `action`, `info`, `done`, …) | as they happen |
+| `vocabulary` | `words` [..] (tonyd skill names, `_` → space) | once after welcome; speech recognition favours them |
 | `request` | `rid`, `op`, args | the bridge needs something from the phone; the phone answers with `reply` |
 
 ### Requests

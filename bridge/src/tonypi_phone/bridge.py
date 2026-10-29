@@ -58,6 +58,7 @@ class Bridge:
             return
         log.info("phone connected: %s (%s)", device, peer)
         await self.hub.attach(ws, device)
+        self._spawn(self._push_vocabulary())
         pusher = asyncio.create_task(self._push_state())
         try:
             async for raw in ws:
@@ -131,10 +132,23 @@ class Bridge:
                     await self.agent.command(text)
                 except LinkDown as e:
                     await self.hub.push({"type": "error", "error": str(e)})
+        elif t == "transcript":
+            log.info("phone heard: %s", msg.get("text", ""))
         elif t == "status":
             self.hub.status = {k: v for k, v in msg.items() if k != "type"}
         elif t == "reply":
             self.hub.on_reply(msg)
+
+    async def _push_vocabulary(self) -> None:
+        """Skill names, so the phone's speech recognition expects them ("step in place", not "step and place")."""
+        try:
+            skills = (await self.tonyd.call("skills", timeout=3)).get("skills", [])
+        except TonydError as e:
+            log.debug("skills: %s", e)
+            return
+        names = [s if isinstance(s, str) else s.get("name", "") for s in skills]
+        words = sorted({n.replace("_", " ") for n in names if n})
+        await self.hub.push({"type": "vocabulary", "words": words})
 
     async def _push_state(self) -> None:
         while True:

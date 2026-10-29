@@ -25,6 +25,16 @@ public final class LinkConnection: Sendable {
         try await task.send(.data(try frame.encoded()))
     }
 
+    /// True if the bridge answers a WebSocket ping within `timeout`. A bridge that vanished without closing the
+    /// socket (power loss, Wi-Fi drop) never answers, and `receive` alone would wait forever.
+    public func ping(timeout: TimeInterval = 5) async -> Bool {
+        await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            let once = Once(cont)
+            task.sendPing { error in once.resume(error == nil) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { once.resume(false) }
+        }
+    }
+
     /// Incoming messages until the socket closes (the stream then finishes, or throws the socket error).
     public func messages() -> AsyncThrowingStream<Incoming, Error> {
         AsyncThrowingStream { continuation in

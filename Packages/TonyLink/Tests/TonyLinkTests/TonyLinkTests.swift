@@ -35,6 +35,9 @@ import Testing
         try Incoming(json: Data(#"{"type":"error","error":"wrong code","tries_left":2}"#.utf8))
             == .error("wrong code", triesLeft: 2))
     #expect(try Incoming(json: Data(#"{"type":"something_new","x":1}"#.utf8)) == .unknown(type: "something_new"))
+    #expect(
+        try Incoming(json: Data(#"{"type":"vocabulary","words":["wave","walk forward"]}"#.utf8))
+            == .vocabulary(["wave", "walk forward"]))
 }
 
 @Test func encodesOutgoing() throws {
@@ -54,4 +57,39 @@ import Testing
     #expect(try BinaryFrame(decoding: data) == frame)
     #expect(try BinaryFrame(decoding: data.dropFirst(0)) == frame)  // slices keep working
     #expect(throws: BinaryFrame.DecodeError.self) { try BinaryFrame(decoding: Data([0, 0, 1, 0, 1])) }
+}
+
+@Test func listenerWakeWordAndCommand() {
+    var l = Listener()
+    #expect(l.hear("Hey Tony", isFinal: false) == .wake)
+    #expect(l.hear("Hey Tony, wave", isFinal: true) == .command("wave"))
+    #expect(l.hear("what a nice day", isFinal: true) == .none)
+}
+
+@Test func listenerFollowUpAfterBareWakeWord() {
+    let t0 = Date()
+    var l = Listener()
+    #expect(l.hear("Tony.", isFinal: true, now: t0) == .wake)
+    #expect(
+        l.hear("walk forward two steps", isFinal: true, now: t0.addingTimeInterval(2))
+            == .command("walk forward two steps"))
+    #expect(l.hear("Tony", isFinal: true, now: t0) == .wake)
+    #expect(l.hear("too late", isFinal: true, now: t0.addingTimeInterval(10)) == .none)
+}
+
+@Test func listenerSnapsNearMissesToSkillWords() {
+    var l = Listener()
+    l.setVocabulary(["wave", "bow", "step in place", "turn left"])
+    #expect(l.hear("Tony Bo.", isFinal: true) == .command("bow"))
+    #expect(l.hear("Hey Tony, wade please", isFinal: true) == .command("wave please"))
+    #expect(l.hear("Tony, step and place", isFinal: true) == .command("step and place"))  // "and" isn't near a skill word
+    #expect(l.hear("Tony, go home", isFinal: true) == .command("go home"))
+}
+
+@Test func listenerStopsOncePerSegmentWithoutWakeWord() {
+    var l = Listener()
+    #expect(l.hear("stop", isFinal: false) == .stop)
+    #expect(l.hear("stop stop", isFinal: false) == .none)  // the same phrase, still being transcribed
+    #expect(l.hear("stop stop Tony wave", isFinal: true) == .none)
+    #expect(l.hear("Freeze!", isFinal: true) == .stop)  // a new segment
 }

@@ -54,6 +54,8 @@ def tonyd_reply(msg: dict) -> dict:
         return {**base, "state": STATE}
     if msg["op"] == "stop":
         return {**base, "stopped": True}
+    if msg["op"] == "skills":
+        return {**base, "skills": ["wave", "step_in_place", {"name": "get_up"}]}
     return {**base, "subscribed": True}
 
 
@@ -133,6 +135,7 @@ async def test_relay_both_ways(rig):
     async with connect(url) as ws:
         await ws.send(json.dumps({"type": "hello", "v": 1, "token": token}))
         await recv_type(ws, "welcome")
+        assert (await recv_type(ws, "vocabulary"))["words"] == ["get up", "step in place", "wave"]
         assert (await recv_type(ws, "robot_state"))["state"]["battery_mv"] == 11560
 
         await ws.send(json.dumps({"type": "stop"}))

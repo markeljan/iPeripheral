@@ -3,6 +3,9 @@ import Foundation
 import Observation
 import TonyLink
 import UIKit
+import os
+
+private let log = Logger(subsystem: "org.example.iperipheral", category: "link")
 
 /// The app's whole job: stay connected to the bridge, answer its requests with the phone's senses, show a face.
 @MainActor @Observable
@@ -16,6 +19,8 @@ final class PeripheralLink {
 
     static let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     static let fallbackURL = URL(string: "ws://tonypi.local:8766/")!
+    /// Give up on a connection attempt that hasn't been answered by then (URLSession would wait 60 s).
+    static let handshakeTimeout: Duration = .seconds(8)
 
     private(set) var phase: Phase = .searching
     private(set) var robot: RobotState?
@@ -23,6 +28,9 @@ final class PeripheralLink {
     private(set) var lastSaid: String?
     private(set) var requestsServed = 0
     private(set) var lastError: String?
+    /// What the phone's own ears last transcribed, and whether they are on.
+    private(set) var phoneHeard: String?
+    private(set) var earsState = "off"
     private var faceOverride: (face: Face, until: Date)?
     private var agentFace: Face = .idle
 
@@ -36,11 +44,15 @@ final class PeripheralLink {
     private let voice = Voice()
     private var conn: LinkConnection?
     private var loop: Task<Void, Never>?
+    private var ears: AnyObject?
+    private var listener = Listener()
+    private var awake = false
 
     var face: Face {
         if let o = faceOverride, o.until > Date() { return o.face }
         guard case .connected = phase else { return .offline }
         if voice.speaking { return .speaking }
+        if awake { return .listening }
         if robot?.asleep == true { return .asleep }
         return agentFace
     }
@@ -53,6 +65,7 @@ final class PeripheralLink {
         #endif
         loop = Task { await run() }
         senses.start()
+        startEars()
     }
 
     // ---- connection loop ----------------------------------------------------------------------------------------
@@ -67,7 +80,9 @@ final class PeripheralLink {
                 url = await BridgeBrowser.find(timeout: 4) ?? Self.fallbackURL
             }
             phase = .connecting(url.absoluteString)
+            log.info("connecting \(url.absoluteString, privacy: .public)")
             await session(url)
+            log.info("session ended: \(self.lastError ?? "closed", privacy: .public)")
             conn = nil
             try? await Task.sleep(for: .seconds(2))
         }
@@ -77,6 +92,13 @@ final class PeripheralLink {
         let c = LinkConnection(url: url)
         conn = c
         c.open()
+        let watchdog = Task { [weak self] in
+            try? await Task.sleep(for: Self.handshakeTimeout)
+            guard let self, !Task.isCancelled, case .connecting = self.phase else { return }
+            self.lastError = "no answer from \(url.host() ?? "bridge")"
+            c.close()
+        }
+        defer { watchdog.cancel() }
         let device = UIDevice.current.name
         do {
             if let token = Keychain.token {
@@ -116,6 +138,9 @@ final class PeripheralLink {
         case .request(let rid, let op, let args):
             requestsServed += 1
             await answer(rid: rid, op: op, args: args, on: c)
+        case .vocabulary(let words):
+            listener.setVocabulary(Listener.baseVocabulary + words)
+            if #available(iOS 26, *), let e = ears as? Ears { Task { await e.setVocabulary(words) } }
         case .unknown:
             break
         }
@@ -212,7 +237,10 @@ final class PeripheralLink {
                 faceOverride = (f, Date().addingTimeInterval(args["seconds"]?.double ?? 5))
                 try await c.send(.reply(rid: rid, ok: true))
             case "status":
-                try await c.send(.reply(rid: rid, ok: true, fields: Self.phoneStatus(cameraOn: senses.running).object))
+                try await c.send(
+                    .reply(
+                        rid: rid, ok: true,
+                        fields: Self.phoneStatus(cameraOn: senses.running, listening: earsState == "listening").object))
             default:
                 throw LinkError("unknown op \(op)")
             }
@@ -229,12 +257,18 @@ final class PeripheralLink {
 
     private func statusLoop(_ c: LinkConnection) async {
         while !Task.isCancelled {
-            try? await c.send(.status(Self.phoneStatus(cameraOn: senses.running)))
+            try? await c.send(.status(Self.phoneStatus(cameraOn: senses.running, listening: earsState == "listening")))
             try? await Task.sleep(for: .seconds(5))
+            if Task.isCancelled { return }
+            guard await c.ping(timeout: 5) else {
+                lastError = "bridge stopped answering"
+                c.close()
+                return
+            }
         }
     }
 
-    static func phoneStatus(cameraOn: Bool) -> PhoneStatus {
+    static func phoneStatus(cameraOn: Bool, listening: Bool = false) -> PhoneStatus {
         let d = UIDevice.current
         let thermal =
             switch ProcessInfo.processInfo.thermalState {
@@ -248,7 +282,54 @@ final class PeripheralLink {
             battery: d.batteryLevel >= 0 ? Double(d.batteryLevel) : nil,
             charging: d.batteryState == .charging || d.batteryState == .full,
             thermal: thermal,
-            caps: (cameraOn ? ["camera", "pose", "detect"] + (Senses.hasLiDAR ? ["depth"] : []) : []) + ["say", "face"])
+            caps: (cameraOn ? ["camera", "pose", "detect"] + (Senses.hasLiDAR ? ["depth"] : []) : [])
+                + (listening ? ["voice"] : []) + ["say", "face"])
+    }
+
+    // ---- voice ------------------------------------------------------------------------------------------------
+
+    private func startEars() {
+        guard #available(iOS 26, *) else {
+            earsState = "needs iOS 26"
+            return
+        }
+        let e = Ears()
+        ears = e
+        listener.setVocabulary(Listener.baseVocabulary)
+        e.onText = { [weak self] text, isFinal in
+            Task { @MainActor in self?.heard(text, isFinal: isFinal) }
+        }
+        earsState = "starting"
+        Task {
+            do {
+                try await e.start()
+                earsState = "listening"
+            } catch {
+                earsState = "failed: \(error)"
+            }
+        }
+    }
+
+    private func heard(_ text: String, isFinal: Bool) {
+        if voice.speaking { return }  // don't act on our own voice
+        if isFinal {
+            phoneHeard = text
+            if let conn, case .connected = phase { Task { try? await conn.send(.transcript(text: text)) } }
+        }
+        switch listener.hear(text, isFinal: isFinal) {
+        case .none:
+            if isFinal { awake = false }
+        case .stop:
+            awake = false
+            stop()
+        case .wake:
+            awake = true
+        case .command(let cmd):
+            awake = false
+            agentFace = .thinking
+            guard let conn, case .connected = phase else { return }
+            Task { try? await conn.send(.command(text: cmd)) }
+        }
     }
 
     // ---- user actions -------------------------------------------------------------------------------------------
@@ -295,7 +376,10 @@ final class Voice: NSObject, AVSpeechSynthesizerDelegate {
 
     func say(_ text: String) {
         guard !text.isEmpty else { return }
-        try? AVAudioSession.sharedInstance().setCategory(.playback, options: [.duckOthers])
+        let session = AVAudioSession.sharedInstance()
+        if session.category != .playAndRecord {  // Ears set up record + speaker already; don't break the mic
+            try? session.setCategory(.playback, options: [.duckOthers])
+        }
         synth.speak(AVSpeechUtterance(string: text))
         speaking = true
     }

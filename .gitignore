@@ -1,0 +1,13 @@
+.DS_Store
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+build/
+.build/
+.swiftpm/
+App/Config/Local.xcconfig
+App/Info.plist
+__pycache__/
+.venv/
+.pytest_cache/
+*.egg-info/

@@ -1,0 +1,4 @@
+// Signing for the free Personal Team. Put your team ID in App/Config/Local.xcconfig (gitignored):
+//   DEVELOPMENT_TEAM = ABCDE12345
+// scripts/team.sh writes it from the signing identity Xcode created.
+#include? "Local.xcconfig"

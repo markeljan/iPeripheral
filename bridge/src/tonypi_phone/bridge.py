@@ -1,0 +1,146 @@
+"""The phone's WebSocket endpoint: auth/pairing, then relay between the phone and the robot (docs/protocol.md)."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+
+from websockets.exceptions import ConnectionClosed
+
+from tonypi_phone import __version__
+from tonypi_phone.hub import PhoneHub, unpack_frame
+from tonypi_phone.links import AgentLink, LinkDown, TonydError, TonydLink
+from tonypi_phone.pairing import CODE_TTL_S, PairingAttempt, TokenStore
+
+log = logging.getLogger(__name__)
+PROTOCOL = 1
+AUTH_TIMEOUT_S = 10
+STATE_EVERY_S = 1.0
+CLOSE_AUTH = 4401
+
+
+class Bridge:
+    def __init__(self, tokens: TokenStore, tonyd_sock: str | None = None, agent_sock: str | None = None) -> None:
+        self.hub = PhoneHub()
+        self.tokens = tokens
+        kw = {} if tonyd_sock is None else {"path": tonyd_sock}
+        self.tonyd = TonydLink(self._relay("robot_event"), **kw)
+        kw = {} if agent_sock is None else {"path": agent_sock}
+        self.agent = AgentLink(self._relay("agent_event"), **kw)
+        self._tasks: set[asyncio.Task] = set()
+
+    def _relay(self, type_: str):
+        def on_event(event: dict) -> None:
+            self._spawn(self.hub.push({"type": type_, "event": event}))
+        return on_event
+
+    def _spawn(self, coro) -> None:
+        t = asyncio.get_running_loop().create_task(coro)
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+
+    async def run_links(self) -> None:
+        await asyncio.gather(self.tonyd.run(), self.agent.run())
+
+    # ---- connection ---------------------------------------------------------------------------------------------
+
+    async def handler(self, ws) -> None:
+        peer = getattr(ws, "remote_address", None)
+        try:
+            device = await self._authenticate(ws)
+        except (ConnectionClosed, TimeoutError, ValueError) as e:
+            log.info("phone %s not authenticated: %s", peer, e)
+            await ws.close(CLOSE_AUTH, "not authenticated")
+            return
+        if device is None:
+            await ws.close(CLOSE_AUTH, "not authenticated")
+            return
+        log.info("phone connected: %s (%s)", device, peer)
+        await self.hub.attach(ws, device)
+        pusher = asyncio.create_task(self._push_state())
+        try:
+            async for raw in ws:
+                try:
+                    await self._on_phone(raw)
+                except Exception:
+                    log.exception("bad phone message")
+        except ConnectionClosed:
+            pass
+        finally:
+            pusher.cancel()
+            self.hub.detach(ws)
+            log.info("phone disconnected: %s", device)
+
+    async def _authenticate(self, ws) -> str | None:
+        """Returns the device name once authenticated, or None after telling the phone why not."""
+        first = json.loads(await asyncio.wait_for(ws.recv(), AUTH_TIMEOUT_S))
+        device = str(first.get("device", "phone"))
+        welcome = {"type": "welcome", "v": PROTOCOL, "robot": "tonypi", "bridge": __version__}
+        if first.get("type") == "hello":
+            if self.tokens.check(str(first.get("token", ""))):
+                await ws.send(json.dumps(welcome))
+                return device
+            await ws.send(json.dumps({"type": "error", "error": "bad token"}))
+            return None
+        if first.get("type") != "pair_request":
+            await ws.send(json.dumps({"type": "error", "error": "send hello or pair_request first"}))
+            return None
+
+        attempt = PairingAttempt()
+        log.warning("pairing code for %s: %s (valid %d s)", device, attempt.code, CODE_TTL_S)
+        try:
+            await self.agent.say(attempt.spoken)
+        except LinkDown:
+            log.warning("agent not running, so the code was not spoken; read it from this log")
+        await ws.send(json.dumps({"type": "pair_code_sent"}))
+        while True:
+            msg = json.loads(await asyncio.wait_for(ws.recv(), CODE_TTL_S + 10))
+            if msg.get("type") != "pair_confirm":
+                continue
+            if attempt.confirm(str(msg.get("code", ""))):
+                token = self.tokens.issue(device)
+                await ws.send(json.dumps({**welcome, "token": token}))
+                log.warning("paired %s", device)
+                return device
+            if attempt.expired() or attempt.tries_left <= 0:
+                await ws.send(json.dumps({"type": "error", "error": "pairing failed, start again", "tries_left": 0}))
+                return None
+            await ws.send(json.dumps({"type": "error", "error": "wrong code", "tries_left": attempt.tries_left}))
+
+    # ---- phone → robot ------------------------------------------------------------------------------------------
+
+    async def _on_phone(self, raw: str | bytes) -> None:
+        if isinstance(raw, bytes):
+            header, payload = unpack_frame(raw)
+            if header.get("type") == "reply":
+                self.hub.on_reply(header, payload)
+            return
+        msg = json.loads(raw)
+        t = msg.get("type")
+        if t == "stop":
+            log.warning("stop from phone")
+            try:
+                await self.tonyd.call("stop", timeout=2)
+            except TonydError as e:
+                log.error("stop failed: %s", e)
+        elif t == "command":
+            text = str(msg.get("text", "")).strip()
+            if text:
+                try:
+                    await self.agent.command(text)
+                except LinkDown as e:
+                    await self.hub.push({"type": "error", "error": str(e)})
+        elif t == "status":
+            self.hub.status = {k: v for k, v in msg.items() if k != "type"}
+        elif t == "reply":
+            self.hub.on_reply(msg)
+
+    async def _push_state(self) -> None:
+        while True:
+            try:
+                st = await self.tonyd.call("state", timeout=2)
+                await self.hub.push({"type": "robot_state", "state": st["state"]})
+            except TonydError as e:
+                log.debug("state: %s", e)
+            await asyncio.sleep(STATE_EVERY_S)

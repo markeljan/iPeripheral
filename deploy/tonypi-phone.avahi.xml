@@ -1,0 +1,11 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- Bonjour advert so the phone finds the bridge: /etc/avahi/services/tonypi-phone.service -->
+<service-group>
+  <name>Tony</name>
+  <service>
+    <type>_tonypi-phone._tcp</type>
+    <port>8766</port>
+    <txt-record>v=1</txt-record>
+  </service>
+</service-group>

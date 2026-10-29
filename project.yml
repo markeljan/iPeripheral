@@ -1,0 +1,48 @@
+name: iPeripheral
+options:
+  bundleIdPrefix: org.example
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+packages:
+  TonyLink:
+    path: Packages/TonyLink
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  iPeripheral:
+    type: application
+    platform: iOS
+    sources:
+      - App/Sources
+      - App/Resources
+    configFiles:
+      Debug: App/Config/Signing.xcconfig
+      Release: App/Config/Signing.xcconfig
+    dependencies:
+      - package: TonyLink
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.example.iperipheral
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: NO
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Tony Eyes
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UIApplicationSupportsIndirectInputEvents: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSCameraUsageDescription: Tony uses the camera as its eyes.
+        NSMicrophoneUsageDescription: Tony listens for "hey Tony" through the microphone.
+        NSSpeechRecognitionUsageDescription: Tony turns what you say into commands on this phone.
+        NSLocalNetworkUsageDescription: Tony's phone talks to the robot over your Wi-Fi.
+        NSBonjourServices: [_tonypi-phone._tcp]
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true

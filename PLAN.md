@@ -94,8 +94,8 @@ logged by the bridge: working against the fake agent with Mac TTS through a spea
 (AVSpeech or Piper audio from the Pi); face lip-sync. Compare WER and latency against the Pi's zipformer and
 LFM3-Audio on the same recorded commands. *Done when:* "hey Tony, wave" works from 3 m in a normal room, 9/10 times.
 
-**P4 — Spatial. [ARKit session, depth/obstacles/pose/detect ops + MCP tools built; orientation not yet checked with
-the phone upright]** ARKit world tracking → `phone_pose` (30 Hz) with the phone→body offset; LiDAR depth for obstacle
+**P4 — Spatial. [ARKit session, depth/obstacles/pose/detect ops + MCP tools built and checked with the phone upright:
+image orientation, depth left/right/up/down, and person/face/hand boxes line up; closed-loop walking still to do]** ARKit world tracking → `phone_pose` (30 Hz) with the phone→body offset; LiDAR depth for obstacle
 distance; Vision person/ball detection → `phone_detect`. Closed-loop "walk to that": detect → head track → walk until
 depth < 40 cm, correcting heading from ARKit, not step counts. *Done when:* Tony walks to a ball 2 m away and stops.
 

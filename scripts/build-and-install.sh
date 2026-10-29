@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the app for the connected iPhone and install + launch it. Re-run weekly: free Personal Team
 # provisioning profiles expire after 7 days. Usage: scripts/build-and-install.sh [--console]
+# APP_ARGS is passed to the app, e.g. APP_ARGS="-devToken $(scripts/dev-bridge.sh --token)" (Debug builds only).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -24,7 +25,7 @@ xcodebuild -project iPeripheral.xcodeproj -scheme iPeripheral -configuration Deb
 APP="build/dd/Build/Products/Debug-iphoneos/iPeripheral.app"
 xcrun devicectl device install app --device "$DEVICE" "$APP"
 if [ "${1:-}" = "--console" ]; then
-  xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --console org.example.iperipheral
+  xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --console org.example.iperipheral -- ${APP_ARGS:-}
 else
-  xcrun devicectl device process launch --device "$DEVICE" --terminate-existing org.example.iperipheral
+  xcrun devicectl device process launch --device "$DEVICE" --terminate-existing org.example.iperipheral -- ${APP_ARGS:-}
 fi

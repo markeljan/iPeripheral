@@ -27,8 +27,13 @@ def main() -> None:
     ap.add_argument("--host", default=os.environ.get("TONYPI_PHONE_HOST", "0.0.0.0"))
     ap.add_argument("--port", type=int, default=int(os.environ.get("TONYPI_PHONE_PORT", "8766")))
     ap.add_argument("--mcp-port", type=int, default=int(os.environ.get("TONYPI_PHONE_MCP_PORT", "8767")))
+    ap.add_argument("--issue-token", metavar="DEVICE",
+                    help="print a new phone token and exit (pairing without the spoken code, e.g. for dev installs)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
+    if args.issue_token:
+        print(TokenStore().issue(args.issue_token))
+        return
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("websockets").setLevel(logging.WARNING)

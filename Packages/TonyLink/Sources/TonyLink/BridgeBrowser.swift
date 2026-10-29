@@ -28,16 +28,18 @@ public enum BridgeBrowser {
         }
     }
 
-    /// Resolve a Bonjour endpoint to host:port by opening (and dropping) a TCP connection to it.
+    /// Resolve a Bonjour endpoint to host:port by opening (and dropping) a TCP connection to it. IPv4 only: a
+    /// link-local IPv6 address needs its zone, which ws:// URLs can't carry reliably.
     private static func resolve(_ endpoint: NWEndpoint, done: @escaping @Sendable (URL?) -> Void) {
-        let conn = NWConnection(to: endpoint, using: .tcp)
+        let params = NWParameters.tcp
+        (params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options)?.version = .v4
+        let conn = NWConnection(to: endpoint, using: params)
         conn.stateUpdateHandler = { state in
             switch state {
             case .ready:
                 if case .hostPort(let host, let port) = conn.currentPath?.remoteEndpoint {
                     var h = "\(host)"
-                    if let pct = h.firstIndex(of: "%") { h = String(h[..<pct]) }  // drop the IPv6 zone
-                    if h.contains(":") { h = "[\(h)]" }
+                    if let pct = h.firstIndex(of: "%") { h = String(h[..<pct]) }
                     done(URL(string: "ws://\(h):\(port.rawValue)/"))
                 } else {
                     done(nil)

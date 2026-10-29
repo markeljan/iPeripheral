@@ -32,7 +32,7 @@ final class PeripheralLink {
         set { UserDefaults.standard.set(newValue, forKey: "bridgeURL") }
     }
 
-    private let camera = Camera()
+    private let senses = Senses()
     private let voice = Voice()
     private var conn: LinkConnection?
     private var loop: Task<Void, Never>?
@@ -47,8 +47,12 @@ final class PeripheralLink {
 
     func start() {
         guard loop == nil else { return }
+        #if DEBUG
+            // Dev installs: `-devToken <token>` from scripts/dev-bridge.sh --token skips the spoken pairing code.
+            if let t = UserDefaults.standard.string(forKey: "devToken"), !t.isEmpty { Keychain.token = t }
+        #endif
         loop = Task { await run() }
-        Task { try? await camera.start() }
+        senses.start()
     }
 
     // ---- connection loop ----------------------------------------------------------------------------------------
@@ -140,17 +144,64 @@ final class PeripheralLink {
             case "snapshot":
                 let maxSide = args["max_side"]?.int ?? 1280
                 let quality = args["quality"]?.double ?? 0.7
-                let cam = camera
-                let shot = try await Task.detached { try cam.snapshot(maxSide: maxSide, quality: quality) }.value
+                let shot = try await off { try $0.snapshot(maxSide: maxSide, quality: quality) }
                 let header = Outgoing.reply(
                     rid: rid, ok: true,
                     fields: [
                         "mime": "image/jpeg", "width": .number(Double(shot.width)),
                         "height": .number(Double(shot.height)),
-                        "frame_age_s": .number((shot.age * 1000).rounded() / 1000), "lens": "back_wide",
+                        "frame_age_s": .number(ms(shot.age)), "lens": "back_wide",
                     ]
                 ).object
                 try await c.send(BinaryFrame(header: header, payload: shot.jpeg))
+            case "depth":
+                var fields: [String: JSONValue] = [:]
+                let pts = (args["points"]?.array ?? []).compactMap { p -> (Double, Double)? in
+                    guard let a = p.array, a.count == 2, let x = a[0].double, let y = a[1].double else { return nil }
+                    return (x, y)
+                }
+                if !pts.isEmpty {
+                    let ds = try await off { try $0.depth(at: pts) }
+                    fields["points"] = .array(
+                        zip(pts, ds).map { p, d in
+                            [
+                                "x": .number(p.0), "y": .number(p.1), "m": d.metres.map { .number($0) } ?? .null,
+                                "confidence": .number(Double(d.confidence)),
+                            ]
+                        })
+                }
+                if let g = args["grid"]?.array, g.count == 2, let cols = g[0].int, let rows = g[1].int,
+                    (1...16).contains(cols), (1...16).contains(rows)
+                {
+                    let grid = try await off { try $0.depthGrid(cols: cols, rows: rows) }
+                    fields["grid"] = .array(grid.map { .array($0.map { $0.map { .number($0) } ?? .null }) })
+                }
+                try await c.send(.reply(rid: rid, ok: true, fields: fields))
+            case "pose":
+                let p = try await off { try $0.pose() }
+                try await c.send(
+                    .reply(
+                        rid: rid, ok: true,
+                        fields: [
+                            "x": .number(cm(p.x)), "y": .number(cm(p.y)), "z": .number(cm(p.z)),
+                            "yaw_deg": .number(p.yawDeg.rounded()), "pitch_deg": .number(p.pitchDeg.rounded()),
+                            "tracking": .string(p.tracking), "age_s": .number(ms(p.age)),
+                        ]))
+            case "reset_origin":
+                senses.resetOrigin()
+                try await c.send(.reply(rid: rid, ok: true))
+            case "detect":
+                let kinds = Set(args["kinds"]?.array?.compactMap(\.string) ?? Senses.detectKinds)
+                let r = try await off { try $0.detect(kinds: kinds) }
+                let objects: [JSONValue] = r.objects.map { d in
+                    [
+                        "kind": .string(d.kind), "x": .number(cm(d.x)), "y": .number(cm(d.y)),
+                        "w": .number(cm(d.w)), "h": .number(cm(d.h)), "confidence": .number(cm(d.confidence)),
+                        "m": d.metres.map { .number($0) } ?? .null,
+                    ]
+                }
+                try await c.send(
+                    .reply(rid: rid, ok: true, fields: ["objects": .array(objects), "age_s": .number(ms(r.age))]))
             case "say":
                 voice.say(args["text"]?.string ?? "")
                 try await c.send(.reply(rid: rid, ok: true))
@@ -161,7 +212,7 @@ final class PeripheralLink {
                 faceOverride = (f, Date().addingTimeInterval(args["seconds"]?.double ?? 5))
                 try await c.send(.reply(rid: rid, ok: true))
             case "status":
-                try await c.send(.reply(rid: rid, ok: true, fields: Self.phoneStatus(cameraOn: camera.running).object))
+                try await c.send(.reply(rid: rid, ok: true, fields: Self.phoneStatus(cameraOn: senses.running).object))
             default:
                 throw LinkError("unknown op \(op)")
             }
@@ -170,9 +221,15 @@ final class PeripheralLink {
         }
     }
 
+    /// Runs a Senses query off the main actor (image encoding and Vision take tens of ms).
+    private func off<T: Sendable>(_ body: @escaping @Sendable (Senses) throws -> T) async throws -> T {
+        let s = senses
+        return try await Task.detached { try body(s) }.value
+    }
+
     private func statusLoop(_ c: LinkConnection) async {
         while !Task.isCancelled {
-            try? await c.send(.status(Self.phoneStatus(cameraOn: camera.running)))
+            try? await c.send(.status(Self.phoneStatus(cameraOn: senses.running)))
             try? await Task.sleep(for: .seconds(5))
         }
     }
@@ -190,7 +247,8 @@ final class PeripheralLink {
         return PhoneStatus(
             battery: d.batteryLevel >= 0 ? Double(d.batteryLevel) : nil,
             charging: d.batteryState == .charging || d.batteryState == .full,
-            thermal: thermal, caps: cameraOn ? ["camera", "say", "face"] : ["say", "face"])
+            thermal: thermal,
+            caps: (cameraOn ? ["camera", "pose", "detect"] + (Senses.hasLiDAR ? ["depth"] : []) : []) + ["say", "face"])
     }
 
     // ---- user actions -------------------------------------------------------------------------------------------
@@ -214,6 +272,10 @@ final class PeripheralLink {
 
     func reconnect() { conn?.close() }
 }
+
+/// Rounding for the wire: centimetres / hundredths, and milliseconds.
+private func cm(_ v: Double) -> Double { (v * 100).rounded() / 100 }
+private func ms(_ v: Double) -> Double { (v * 1000).rounded() / 1000 }
 
 struct LinkError: Error, CustomStringConvertible {
     let description: String

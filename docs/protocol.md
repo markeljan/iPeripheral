@@ -56,12 +56,19 @@ The bridge stores only a SHA-256 of each token (`~/.config/tonypi-phone/tokens.j
 | `say` | `text` | `{"ok":true}` when speaking starts (phone TTS) |
 | `face` | `face` (`idle/listening/thinking/speaking/happy/sad/warn/asleep`), `seconds` (override duration) | `{"ok":true}` |
 | `status` | | same fields as the `status` message |
+| `depth` | `points` [[x,y],…] and/or `grid` [cols,rows] (1–16) | `points` [{x,y,m,confidence 0–2}], `grid` [[m\|null]] row 0 = top, nearest (5th percentile) per cell |
+| `pose` | | `x,y,z` m (y up, origin where tracking started), `yaw_deg` (+ = turned left), `pitch_deg`, `tracking` (`normal`, `limited:<reason>`, `not_available`), `age_s` |
+| `reset_origin` | | `{"ok":true}`; the current pose becomes the origin |
+| `detect` | `kinds` [`people`,`faces`,`hands`] (default all) | `objects` [{kind,x,y,w,h,confidence,m}], `age_s` |
 
-Later (P4): `depth_at {x,y}`, `pose`, `detect {kinds}`.
+Image coordinates (`x,y,w,h`) are 0–1 in the portrait snapshot image, origin top-left. Depth is LiDAR (ARKit
+`smoothedSceneDepth`, 256×192), median of a small patch, low-confidence pixels dropped; `m` is null when nothing is
+reliable. One ARKit session owns the back camera, so snapshot, depth, pose and detect all read the same latest frame.
 
 ## Bridge internals (not on the wire)
 - tonyd: `/run/tonypi/tonyd.sock`, JSON lines `{"op":…, "rid":n}` → `{"rid":n,"ok":true,…}`; `{"op":"subscribe"}` → events
   `{"event":"job"|"warn",…}`.
 - agent: `/run/tonypi/agent.sock`, JSON lines; send `{"text":"…"}` (command) or `{"op":"say","text":"…"}`; every
   connected client gets the agent's events `{"type":…}`.
-- MCP: `http://127.0.0.1:8767/mcp` (Streamable HTTP, localhost only): `phone_status`, `phone_snapshot`, `phone_say`, `set_face`.
+- MCP: `http://127.0.0.1:8767/mcp` (Streamable HTTP, localhost only): `phone_status`, `phone_snapshot`,
+  `phone_depth_at`, `phone_obstacles`, `phone_pose`, `phone_reset_origin`, `phone_detect`, `phone_say`, `set_face`.

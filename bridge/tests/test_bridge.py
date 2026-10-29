@@ -168,7 +168,8 @@ async def test_snapshot_request_over_binary_frame(rig):
         await answer
         assert header["mime"] == "image/jpeg" and payload == b"\xff\xd8jpeg"
         names = {t.name for t in await mcp.list_tools()}
-        assert names == {"phone_status", "phone_snapshot", "phone_say", "set_face"}
+        assert names == {"phone_status", "phone_snapshot", "phone_say", "set_face", "phone_depth_at",
+                         "phone_obstacles", "phone_pose", "phone_reset_origin", "phone_detect"}
 
 
 async def test_newer_phone_replaces_older(rig):
@@ -196,3 +197,24 @@ def test_pairing_attempt_rules():
 def test_frame_round_trip():
     header, payload = unpack_frame(pack_frame({"type": "reply", "rid": 1}, b"abc"))
     assert header == {"type": "reply", "rid": 1} and payload == b"abc"
+
+
+async def test_obstacles_tool_shapes_the_depth_grid(rig):
+    bridge, _, _, url = rig
+    token = bridge.tokens.issue("test phone")
+    mcp = build_mcp(bridge.hub)
+    async with connect(url) as ws:
+        await ws.send(json.dumps({"type": "hello", "v": 1, "token": token}))
+        await recv_type(ws, "welcome")
+
+        async def phone():
+            req = await recv_type(ws, "request")
+            assert req["op"] == "depth" and req["grid"] == [3, 3]
+            grid = [[None, 2.5, 3.0], [1.2, 0.8, None], [0.5, 0.45, 0.6]]
+            await ws.send(json.dumps({"type": "reply", "rid": req["rid"], "ok": True, "grid": grid}))
+
+        answer = asyncio.create_task(phone())
+        result = await mcp.call_tool("phone_obstacles", {})
+        await answer
+        text = json.dumps(result, default=lambda o: getattr(o, "text", str(o)))
+        assert '\\"nearest_m\\": 0.45' in text and '\\"centre\\": 0.8' in text

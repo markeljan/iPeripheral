@@ -1,15 +1,18 @@
 # iPeripheral — Tony's mounted iPhone
 
-An iPhone mounted on the TonyPi humanoid becomes its senses (camera, later LiDAR/ARKit/mic) and face. Read
+An iPhone mounted on the TonyPi humanoid becomes its senses (camera, LiDAR depth, ARKit pose, Vision detection, later
+mic) and face. Read
 `PLAN.md` (phases, decisions) and `docs/protocol.md` (the wire protocol) before changing anything.
 
 ## Layout
 - `App/` SwiftUI app "Tony Eyes" (`org.example.iperipheral`, iOS 18+, Swift 6). `PeripheralLink.swift` is the core:
-  connection loop, pairing, answering bridge requests. Tap on the face = stop the body.
+  connection loop, pairing, answering bridge requests. `Senses.swift` is one ARKit session (camera image + LiDAR depth +
+  pose + Vision). Tap on the face = stop the body.
 - `Packages/TonyLink/` protocol types + WebSocket client + Bonjour browser. `cd Packages/TonyLink && swift test`.
 - `bridge/` Python package `tonypi-phone` that runs on the Pi (WS :8766 on the LAN, MCP on 127.0.0.1:8767).
   `cd bridge && uv run pytest` (fake tonyd/agent sockets, no robot needed).
 - `deploy/` systemd unit, Bonjour advert, `install.sh` (rsync + uv sync + restart on `tonypi`).
+- `scripts/phone-mcp.py TOOL [k=v ...]` calls one bridge MCP tool (`uv run --project bridge scripts/phone-mcp.py list`).
 - `scripts/build-and-install.sh [--console]` builds, installs and launches on the iPhone; `scripts/team.sh` writes the
   signing team into `App/Config/Local.xcconfig` (gitignored).
 
@@ -23,6 +26,13 @@ An iPhone mounted on the TonyPi humanoid becomes its senses (camera, later LiDAR
   **Message the TonyPi MVP session before deploying to the Pi or restarting any service there.**
 - `stop` never depends on the phone. The phone never drives joints; bodies move only through tonyd skills.
 - One `xcodebuild` at a time (no parallel builds from subagents: DerivedData locks).
+
+## Dev loop without the robot
+`scripts/dev-bridge.sh` runs the bridge on this Mac against `tonypi-fake-robot` (fake tonyd + agent sockets in
+`/tmp/tpdev`) and advertises it over Bonjour, so the real phone connects to the Mac exactly as it would to the Pi.
+Skip spoken pairing with `APP_ARGS="-devToken $(scripts/dev-bridge.sh --token)" scripts/build-and-install.sh` (Debug
+only; tokens in `build/dev-tokens.json`). Needs the sandbox off (it listens on the LAN). Stop the dev bridge before
+testing against the Pi, or the phone may pick the Mac.
 
 ## Device
 - iPhone 14 Pro Max (iPhone15,3), iOS 27.0.1, UDID `YOUR_DEVICE_ID`, wired. Free Personal Team `GG7SNY5A85`:

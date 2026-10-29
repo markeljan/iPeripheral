@@ -1,6 +1,7 @@
 # iPeripheral — iPhone 14 Pro Max as Tony's mounted senses
 
-Status: plan, 2026-10-29. Nothing built yet.
+Status: 2026-10-29. P0 done; P1 and P4 senses working against a fake robot on the Mac; nothing deployed to the Pi yet
+(waiting for M1 to merge).
 Decisions: **mounted peripheral only** (no handheld remote UI) · **free Apple ID** signing · **Pi bridge lives in this repo**.
 
 ## Goal
@@ -76,7 +77,7 @@ docs/protocol.md
 **P0 — Setup. [done 2026-10-29 except device install]** Me: `git init`, install XcodeGen, scaffold `App/` + `TonyLink` + `bridge/`,
 simulator build, bridge tests with fakes. You: "Human steps" below.
 
-**P1 — Link + eyes.** Bridge v0: WS + Bonjour + pairing, `tonyd` state/warn relay, MCP `phone_snapshot`.
+**P1 — Link + eyes. [link, snapshot, face, say verified phone ↔ Mac dev bridge; Pi deploy waits for M1]** Bridge v0: WS + Bonjour + pairing, `tonyd` state/warn relay, MCP `phone_snapshot`.
 App: discover → pair → stream camera on request; minimal face (idle/listening/thinking/warn) driven by tonyd events;
 tap = stop; debug overlay (link, fps, battery, thermal state).
 *Done when:* Claude Code on the Mac, with both MCP servers, can `phone_snapshot` and describe what the phone sees,
@@ -92,7 +93,8 @@ Power: battery pack, or USB from the Pi (5 A board budget, check `vcgencmd get_t
 (AVSpeech or Piper audio from the Pi); face lip-sync. Compare WER and latency against the Pi's zipformer and
 LFM3-Audio on the same recorded commands. *Done when:* "hey Tony, wave" works from 3 m in a normal room, 9/10 times.
 
-**P4 — Spatial.** ARKit world tracking → `phone_pose` (30 Hz) with the phone→body offset; LiDAR depth for obstacle
+**P4 — Spatial. [ARKit session, depth/obstacles/pose/detect ops + MCP tools built; orientation not yet checked with
+the phone upright]** ARKit world tracking → `phone_pose` (30 Hz) with the phone→body offset; LiDAR depth for obstacle
 distance; Vision person/ball detection → `phone_detect`. Closed-loop "walk to that": detect → head track → walk until
 depth < 40 cm, correcting heading from ARKit, not step counts. *Done when:* Tony walks to a ball 2 m away and stops.
 

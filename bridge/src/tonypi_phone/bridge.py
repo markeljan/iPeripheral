@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 from websockets.exceptions import ConnectionClosed
 
@@ -132,6 +133,12 @@ class Bridge:
                     await self.agent.command(text)
                 except LinkDown as e:
                     await self.hub.push({"type": "error", "error": str(e)})
+        elif t == "pose":
+            self.hub.pose = msg | {"t": time.monotonic()}
+        elif t == "event":
+            self.hub.events.append(msg | {"t": time.monotonic()})
+            level = logging.WARNING if msg.get("kind") in ("fall", "impact", "freefall") else logging.INFO
+            log.log(level, "phone event: %s", {k: v for k, v in msg.items() if k != "type"})
         elif t == "transcript":
             log.info("phone heard: %s", msg.get("text", ""))
         elif t == "status":

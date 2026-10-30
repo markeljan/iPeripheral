@@ -1,18 +1,22 @@
 # iPeripheral — Tony's mounted iPhone
 
-An iPhone mounted on the TonyPi humanoid becomes its senses (camera, LiDAR depth, ARKit pose, Vision detection, later
-mic) and face. Read
+An iPhone mounted on the TonyPi humanoid becomes its senses (camera, LiDAR depth, ARKit pose, Vision + YOLO
+detection, ground/edge check, IMU, mic, sound events), its face, and a small on-device brain (LFM3 via llama.cpp). Read
 `PLAN.md` (phases, decisions) and `docs/protocol.md` (the wire protocol) before changing anything.
 
 ## Layout
 - `App/` SwiftUI app "Tony Eyes" (`org.example.iperipheral`, iOS 18+, Swift 6). `PeripheralLink.swift` is the core:
   connection loop, pairing, answering bridge requests. `Senses.swift` is one ARKit session (camera image + LiDAR depth +
   pose + Vision); `Ears.swift` is on-device speech (iOS 26 SpeechAnalyzer), and `Listener` in TonyLink turns transcripts
-  into stop / wake / command. Tap on the face = stop the body.
+  into stop / wake / command. `LocalModel.swift` runs LFM3-1.7B / LFM3-VL-2B (llama.cpp, Metal; GGUFs downloaded to the
+  phone on request), `Motion.swift` is the IMU (fall/impact events). Tap on the face = stop the body.
 - `Packages/TonyLink/` protocol types + WebSocket client + Bonjour browser. `cd Packages/TonyLink && swift test`.
 - `bridge/` Python package `tonypi-phone` that runs on the Pi (WS :8766 on the LAN, MCP on 127.0.0.1:8767).
   `cd bridge && uv run pytest` (fake tonyd/agent sockets, no robot needed).
 - `deploy/` systemd unit, Bonjour advert, `install.sh` (rsync + uv sync + restart on `tonypi`).
+- `scripts/fetch-vendor.sh` (run by build-and-install) puts pinned llama.cpp into `Vendor/` (gitignored, device slice
+  only, so Simulator builds compile a stub via `canImport(llama)`) and runs `scripts/export-yolo.sh` for
+  `App/Models/yolo11n.mlpackage` (gitignored, AGPL-3.0 Ultralytics model; the app works without it).
 - `scripts/phone-mcp.py TOOL [k=v ...]` calls one bridge MCP tool (`uv run --project bridge scripts/phone-mcp.py list`).
 - `scripts/build-and-install.sh [--console]` builds, installs and launches on the iPhone; `scripts/team.sh` writes the
   signing team into `App/Config/Local.xcconfig` (gitignored).

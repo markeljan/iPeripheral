@@ -5,6 +5,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+scripts/fetch-vendor.sh
 xcodegen generate --quiet
 if [ -z "${DEVICE:-}" ]; then
   J="$(mktemp)"

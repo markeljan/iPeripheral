@@ -61,6 +61,10 @@ public enum Outgoing: Sendable, Equatable {
     case command(text: String)
     /// A finished phrase the phone's ears heard, whatever it was (for logs and tuning the wake word).
     case transcript(text: String)
+    /// Something the phone noticed on its own: `fall`, `impact`, `freefall`, `upright` (motion) or `sound`.
+    case event(kind: String, fields: [String: JSONValue])
+    /// The phone's ARKit pose, streamed ~10 Hz so the bridge always has a fresh one.
+    case pose(fields: [String: JSONValue])
     case status(PhoneStatus)
     case reply(rid: Int, ok: Bool, error: String? = nil, fields: [String: JSONValue] = [:])
 
@@ -81,6 +85,15 @@ public enum Outgoing: Sendable, Equatable {
             return ["type": "command", "text": .string(text)]
         case .transcript(let text):
             return ["type": "transcript", "text": .string(text)]
+        case .event(let kind, let fields):
+            var o = fields
+            o["type"] = "event"
+            o["kind"] = .string(kind)
+            return o
+        case .pose(let fields):
+            var o = fields
+            o["type"] = "pose"
+            return o
         case .status(let s):
             var o = s.object
             o["type"] = "status"

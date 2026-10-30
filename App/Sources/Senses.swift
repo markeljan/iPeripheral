@@ -1,14 +1,16 @@
 @preconcurrency import ARKit
 import CoreImage
+import CoreML
 import UIKit
 import Vision
 
 /// The phone's eyes: one ARKit session gives the camera image, LiDAR depth and the phone's pose together (ARKit
 /// owns the back camera, so there is no separate AVCaptureSession). Keeps only the latest frame; every query
-/// answers from it, so nothing waits for a shutter.
+/// answers from it, so nothing waits for a shutter. The front (TrueDepth) camera tracks the face of whoever looks at
+/// the screen, so Tony's eyes can look back at them.
 ///
-/// Coordinates: `x, y` are normalized 0–1 in the portrait image the snapshot returns, origin top-left. World pose:
-/// metres, y up, origin where tracking started; yaw is degrees, positive = turned left.
+/// Coordinates: `x, y` are normalized 0–1 in the portrait image the snapshot returns, origin top-left. World: metres,
+/// y up, origin where tracking started. Angles are degrees; yaw and bearing are positive to the left.
 final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
     enum Failure: Error, CustomStringConvertible {
         case unavailable, noFrame, noDepth
@@ -26,6 +28,8 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
         var depth: CVPixelBuffer?
         var confidence: CVPixelBuffer?
         var transform: simd_float4x4
+        var intrinsics: simd_float3x3
+        var resolution: CGSize
         var tracking: String
         var at: Date
     }
@@ -37,14 +41,34 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
     private let queue = DispatchQueue(label: "senses")
     private let lock = NSLock()
     private var latest: Latest?
+    private var viewer: (gaze: CGPoint, at: Date)?
     private let ci = CIContext()
     private(set) var running = false
 
+    /// Front-camera face tracking for the eyes' gaze: the first thing to go when the phone gets hot.
+    private(set) var faceTracking = true
+
     func start() {
         guard Self.supported, !running else { return }
+        session.delegate = self
+        session.delegateQueue = queue
+        session.run(configuration())
+        running = true
+    }
+
+    /// Cool down (or back up): face tracking costs a second camera. Tracking and the world origin carry on.
+    func setFaceTracking(_ on: Bool) {
+        guard running, on != faceTracking else { return }
+        faceTracking = on
+        session.run(configuration())
+        if !on { lock.withLock { viewer = nil } }
+    }
+
+    private func configuration() -> ARWorldTrackingConfiguration {
         let config = ARWorldTrackingConfiguration()
         config.worldAlignment = .gravity
         if Self.hasLiDAR { config.frameSemantics.insert(.smoothedSceneDepth) }
+        config.userFaceTrackingEnabled = faceTracking && ARWorldTrackingConfiguration.supportsUserFaceTracking
         // Lowest frame rate at full image size: plenty for a walking robot, and much cooler than 60 fps.
         let formats = ARWorldTrackingConfiguration.supportedVideoFormats
         if let f = formats.filter({ $0.imageResolution.width >= 1920 }).min(by: {
@@ -52,10 +76,7 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
         }) {
             config.videoFormat = f
         }
-        session.delegate = self
-        session.delegateQueue = queue
-        session.run(config)
-        running = true
+        return config
     }
 
     /// Start tracking again with the current position as the origin.
@@ -78,8 +99,19 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
         let depth = frame.smoothedSceneDepth ?? frame.sceneDepth
         let l = Latest(
             image: frame.capturedImage, depth: depth?.depthMap, confidence: depth?.confidenceMap,
-            transform: frame.camera.transform, tracking: tracking, at: Date())
-        lock.withLock { latest = l }
+            transform: frame.camera.transform, intrinsics: frame.camera.intrinsics,
+            resolution: frame.camera.imageResolution, tracking: tracking, at: Date())
+        // The face of whoever looks at the screen (front camera), as a gaze direction in screen space.
+        var gaze: CGPoint?
+        if let face = frame.anchors.compactMap({ $0 as? ARFaceAnchor }).first(where: \.isTracked) {
+            let p = frame.camera.transform.inverse * face.transform.columns.3
+            // Camera space is landscape: camera +y = screen right, camera +x = screen down; the viewer is at +z.
+            if p.z > 0.05 { gaze = CGPoint(x: Double(p.y / p.z), y: Double(p.x / p.z)) }
+        }
+        lock.withLock {
+            latest = l
+            if let gaze { viewer = (gaze, Date()) }
+        }
     }
 
     private func current() throws -> Latest {
@@ -87,7 +119,16 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
         return l
     }
 
-    // ---- snapshot -----------------------------------------------------------------------------------------------
+    /// Where the person looking at the screen is, roughly -1…1 on each axis (x right, y down), if seen in the last
+    /// second.
+    func viewerGaze() -> CGPoint? {
+        lock.withLock {
+            guard let v = viewer, Date().timeIntervalSince(v.at) < 1 else { return nil }
+            return CGPoint(x: max(-1, min(1, v.gaze.x * 1.6)), y: max(-1, min(1, v.gaze.y * 1.6)))
+        }
+    }
+
+    // ---- images -------------------------------------------------------------------------------------------------
 
     struct Snapshot {
         let jpeg: Data
@@ -96,9 +137,7 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
         let age: Double
     }
 
-    /// JPEG of the latest frame, portrait, longest side scaled down to `maxSide`.
-    func snapshot(maxSide: Int, quality: Double) throws -> Snapshot {
-        let l = try current()
+    private func portrait(_ l: Latest, maxSide: Int) -> CIImage {
         var image = CIImage(cvPixelBuffer: l.image).oriented(.right)  // sensor is landscape; mounted phone is portrait
         image = image.transformed(by: .init(translationX: -image.extent.minX, y: -image.extent.minY))
         let side = max(image.extent.width, image.extent.height)
@@ -106,6 +145,13 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
             let s = CGFloat(maxSide) / side
             image = image.transformed(by: CGAffineTransform(scaleX: s, y: s))
         }
+        return image
+    }
+
+    /// JPEG of the latest frame, portrait, longest side scaled down to `maxSide`.
+    func snapshot(maxSide: Int, quality: Double) throws -> Snapshot {
+        let l = try current()
+        let image = portrait(l, maxSide: maxSide)
         guard
             let jpeg = ci.jpegRepresentation(
                 of: image, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
@@ -116,10 +162,70 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
             age: Date().timeIntervalSince(l.at))
     }
 
-    // ---- depth --------------------------------------------------------------------------------------------------
+    /// The latest frame as packed RGB bytes (for the on-device vision model).
+    func rgb(maxSide: Int) throws -> (rgb: [UInt8], width: Int, height: Int) {
+        let l = try current()
+        let image = portrait(l, maxSide: maxSide)
+        let w = Int(image.extent.width.rounded(.down))
+        let h = Int(image.extent.height.rounded(.down))
+        var rgba = [UInt8](repeating: 0, count: w * h * 4)
+        ci.render(
+            image, toBitmap: &rgba, rowBytes: w * 4, bounds: CGRect(x: 0, y: 0, width: w, height: h), format: .RGBA8,
+            colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        var rgb = [UInt8](repeating: 0, count: w * h * 3)
+        for i in 0..<(w * h) {
+            rgb[i * 3] = rgba[i * 4]
+            rgb[i * 3 + 1] = rgba[i * 4 + 1]
+            rgb[i * 3 + 2] = rgba[i * 4 + 2]
+        }
+        return (rgb, w, h)
+    }
+
+    // ---- geometry -----------------------------------------------------------------------------------------------
 
     /// Portrait (x, y) → landscape sensor (sx, sy); the sensor image is the portrait image turned 90° anticlockwise.
     private static func sensor(_ x: Double, _ y: Double) -> (Double, Double) { (y, 1 - x) }
+
+    /// The ray through portrait point (x, y), in world space (unit length), using the camera's intrinsics.
+    private static func ray(_ l: Latest, _ x: Double, _ y: Double) -> SIMD3<Float> {
+        let (sx, sy) = sensor(x, y)
+        let k = l.intrinsics
+        let px = Float(sx * l.resolution.width)
+        let py = Float(sy * l.resolution.height)
+        // ARKit camera space: x right, y up (in sensor orientation), looking down -z. Depth is along -z.
+        let cam = SIMD3<Float>((px - k.columns.2.x) / k.columns.0.x, -(py - k.columns.2.y) / k.columns.1.y, -1)
+        let r = l.transform
+        let world = SIMD3<Float>(
+            r.columns.0.x * cam.x + r.columns.1.x * cam.y + r.columns.2.x * cam.z,
+            r.columns.0.y * cam.x + r.columns.1.y * cam.y + r.columns.2.y * cam.z,
+            r.columns.0.z * cam.x + r.columns.1.z * cam.y + r.columns.2.z * cam.z)
+        return simd_normalize(world)
+    }
+
+    /// World point at portrait (x, y) given its LiDAR depth (metres along the optical axis).
+    private static func worldPoint(_ l: Latest, _ x: Double, _ y: Double, depth: Double) -> SIMD3<Float> {
+        let (sx, sy) = sensor(x, y)
+        let k = l.intrinsics
+        let px = Float(sx * l.resolution.width)
+        let py = Float(sy * l.resolution.height)
+        let d = Float(depth)
+        let cam = SIMD4<Float>(
+            (px - k.columns.2.x) / k.columns.0.x * d, -(py - k.columns.2.y) / k.columns.1.y * d, -d, 1)
+        let w = l.transform * cam
+        return SIMD3(w.x, w.y, w.z)
+    }
+
+    /// Horizontal angle from the body's heading to `dir` (positive = left) and elevation above the horizon.
+    private static func angles(_ l: Latest, _ dir: SIMD3<Float>) -> (bearing: Double, elevation: Double) {
+        let fwd = -simd_make_float3(l.transform.columns.2)
+        let f = simd_normalize(SIMD2<Float>(fwd.x, fwd.z))
+        let v = SIMD2<Float>(dir.x, dir.z)
+        let bearing = atan2(Double(f.y * v.x - f.x * v.y), Double(simd_dot(f, v)))
+        let elevation = asin(Double(max(-1, min(1, dir.y))))
+        return (bearing * 180 / .pi, elevation * 180 / .pi)
+    }
+
+    // ---- depth --------------------------------------------------------------------------------------------------
 
     /// Metres to whatever is at each point (median of a small patch), nil where depth is missing or low confidence.
     func depth(at points: [(Double, Double)]) throws -> [(metres: Double?, confidence: Int)] {
@@ -152,6 +258,76 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
         }
     }
 
+    // ---- ground ahead -------------------------------------------------------------------------------------------
+
+    struct Lane: Sendable {
+        let name: String
+        /// Ground continues at the surface's height out to this distance (metres, horizontal).
+        var clearM: Double?
+        /// The ground drops away (table edge, stairs down) at this distance, by `dropM`.
+        var edgeM: Double?
+        var dropM: Double?
+        /// Something stands up from the ground at this distance.
+        var obstacleM: Double?
+    }
+
+    struct Ground: Sendable {
+        /// How far the surface Tony stands on is below the phone.
+        let surfaceBelowM: Double?
+        let lanes: [Lane]
+        let age: Double
+    }
+
+    /// Walks the lower part of the view outward in three lanes (left, centre, right), turning LiDAR depth into world
+    /// heights, and reports where the ground stops being the surface Tony stands on: an edge (drop > 8 cm) or an
+    /// obstacle (rise > 6 cm). The nearest visible ground is taken as that surface.
+    func ground() throws -> Ground {
+        let l = try current()
+        guard let d = l.depth else { throw Failure.noDepth }
+        let camY = l.transform.columns.3.y
+        let camXZ = SIMD2(l.transform.columns.3.x, l.transform.columns.3.z)
+        let rows = stride(from: 0.98, through: 0.40, by: -0.03).map { $0 }  // bottom of the image (near) upward (far)
+        let lanes: [(String, Double)] = [("left", 0.2), ("centre", 0.5), ("right", 0.8)]
+        // (horizontal distance, height) samples per lane, nearest first
+        var samples: [[(r: Float, y: Float)]] = Array(repeating: [], count: lanes.count)
+        DepthMap.read(d, l.confidence) { m in
+            for (i, lane) in lanes.enumerated() {
+                for v in rows {
+                    let (sx, sy) = Self.sensor(lane.1, v)
+                    guard let depth = m.sample(sx, sy, radius: 2).metres else { continue }
+                    let dir = Self.ray(l, lane.1, v)
+                    guard dir.y < -0.05 else { continue }  // at or above the horizon: not ground
+                    let p = Self.worldPoint(l, lane.1, v, depth: depth)
+                    samples[i].append((simd_length(SIMD2(p.x, p.z) - camXZ), p.y))
+                }
+            }
+        }
+        let nearest = samples.flatMap { $0.prefix(3) }.map(\.y).sorted()
+        guard !nearest.isEmpty else {
+            return Ground(
+                surfaceBelowM: nil, lanes: lanes.map { Lane(name: $0.0) }, age: Date().timeIntervalSince(l.at))
+        }
+        let surface = nearest[nearest.count / 2]
+        let out: [Lane] = lanes.enumerated().map { i, lane in
+            var r = Lane(name: lane.0)
+            for s in samples[i].sorted(by: { $0.r < $1.r }) {
+                let dy = s.y - surface
+                if dy < -0.08 {
+                    r.edgeM = cm(Double(s.r))
+                    r.dropM = cm(Double(-dy))
+                    break
+                }
+                if dy > 0.06 {
+                    r.obstacleM = cm(Double(s.r))
+                    break
+                }
+                r.clearM = cm(Double(s.r))
+            }
+            return r
+        }
+        return Ground(surfaceBelowM: cm(Double(camY - surface)), lanes: out, age: Date().timeIntervalSince(l.at))
+    }
+
     // ---- pose ---------------------------------------------------------------------------------------------------
 
     struct Pose {
@@ -173,15 +349,37 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
 
     // ---- detection ----------------------------------------------------------------------------------------------
 
-    struct Detection {
+    struct Detection: Sendable {
         let kind: String
+        var label: String?
         let x, y, w, h, confidence: Double
         var metres: Double?
+        var bearingDeg = 0.0
+        var elevationDeg = 0.0
+        /// Where it is in the world (pose coordinates), when depth is known: walk there even after it's out of view.
+        var world: SIMD3<Float>?
     }
 
-    static let detectKinds = ["people", "faces", "hands"]
+    /// Detected by default. `text` (OCR) and `codes` (QR, barcodes) only when asked: slower and rarely wanted.
+    static let defaultKinds = ["people", "faces", "hands", "animals", "objects"]
+    static let detectKinds = defaultKinds + ["text", "codes"]
 
-    /// People, faces and hands in the latest frame, with the distance to each box's centre when depth is available.
+    /// YOLO11n (80 COCO classes) compiled into the app from App/Models, on the Neural Engine. Nil when not bundled.
+    nonisolated(unsafe) private static let objectModel: VNCoreMLModel? = {
+        let config = MLModelConfiguration()
+        config.computeUnits = .all
+        for name in ["yolo11n", "YOLOv3TinyFP16"] {
+            if let url = Bundle.main.url(forResource: name, withExtension: "mlmodelc"),
+                let m = try? MLModel(contentsOf: url, configuration: config), let v = try? VNCoreMLModel(for: m)
+            {
+                return v
+            }
+        }
+        return nil
+    }()
+    static var hasObjectModel: Bool { objectModel != nil }
+
+    /// What the camera sees in the latest frame, with distance, bearing and world position when depth has it.
     func detect(kinds: Set<String>) throws -> (objects: [Detection], age: Double) {
         let l = try current()
         let age = Date().timeIntervalSince(l.at)
@@ -197,32 +395,70 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
             r.maximumHandCount = 4
             requests.append(("hands", r))
         }
+        if kinds.contains("animals") { requests.append(("animals", VNRecognizeAnimalsRequest())) }
+        if kinds.contains("objects"), let model = Self.objectModel {
+            let r = VNCoreMLRequest(model: model)
+            r.imageCropAndScaleOption = .scaleFill
+            requests.append(("objects", r))
+        }
+        if kinds.contains("text") {
+            let r = VNRecognizeTextRequest()
+            r.recognitionLevel = .accurate
+            requests.append(("text", r))
+        }
+        if kinds.contains("codes") { requests.append(("codes", VNDetectBarcodesRequest())) }
         let handler = VNImageRequestHandler(cvPixelBuffer: l.image, orientation: .right)
         try handler.perform(requests.map(\.1))
         var out: [Detection] = []
         for (kind, req) in requests {
             for obs in req.results ?? [] {
                 guard let box = Self.box(obs) else { continue }
+                if kind == "objects", let o = obs as? VNRecognizedObjectObservation,
+                    o.labels.first?.identifier == "person"
+                {
+                    continue  // people come from the dedicated (better) human detector
+                }
                 // Vision boxes are normalized with the origin bottom-left; ours is top-left.
                 out.append(
                     Detection(
-                        kind: kind, x: box.minX, y: 1 - box.maxY, w: box.width, h: box.height,
-                        confidence: Double(obs.confidence)))
+                        kind: kind, label: Self.label(obs), x: box.minX, y: 1 - box.maxY, w: box.width,
+                        h: box.height, confidence: Double(obs.confidence)))
             }
+        }
+        for i in out.indices {
+            let cx = out[i].x + out[i].w / 2
+            let cy = out[i].y + out[i].h / 2
+            (out[i].bearingDeg, out[i].elevationDeg) = Self.angles(l, Self.ray(l, cx, cy))
         }
         if let d = l.depth {
             DepthMap.read(d, l.confidence) { m in
                 for i in out.indices {
-                    let (sx, sy) = Self.sensor(out[i].x + out[i].w / 2, out[i].y + out[i].h / 2)
+                    let cx = out[i].x + out[i].w / 2
+                    let cy = out[i].y + out[i].h / 2
+                    let (sx, sy) = Self.sensor(cx, cy)
                     out[i].metres = m.sample(sx, sy, radius: 3).metres
+                    if let md = out[i].metres { out[i].world = Self.worldPoint(l, cx, cy, depth: md) }
                 }
             }
         }
         return (out, age)
     }
 
+    private static func label(_ obs: VNObservation) -> String? {
+        if let o = obs as? VNRecognizedObjectObservation { return o.labels.first?.identifier.lowercased() }
+        if let t = obs as? VNRecognizedTextObservation { return t.topCandidates(1).first?.string }
+        if let b = obs as? VNBarcodeObservation {
+            return [
+                b.symbology.rawValue.replacingOccurrences(of: "VNBarcodeSymbology", with: ""), b.payloadStringValue,
+            ]
+            .compactMap { $0 }.joined(separator: ": ")
+        }
+        return nil
+    }
+
     private static func box(_ obs: VNObservation) -> CGRect? {
         if let r = obs as? VNDetectedObjectObservation { return r.boundingBox }
+        if let r = obs as? VNRectangleObservation { return r.boundingBox }
         if let hand = obs as? VNHumanHandPoseObservation,
             let pts = try? hand.recognizedPoints(.all).values.filter({ $0.confidence > 0.3 }), !pts.isEmpty
         {
@@ -233,6 +469,8 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
         return nil
     }
 }
+
+private func cm(_ v: Double) -> Double { (v * 100).rounded() / 100 }
 
 /// Read access to a LiDAR depth map (Float32 metres) and its confidence map (UInt8 0–2), both in sensor orientation.
 /// Only valid inside `DepthMap.read`, which keeps the buffers locked.

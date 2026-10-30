@@ -11,3 +11,6 @@ __pycache__/
 .venv/
 .pytest_cache/
 *.egg-info/
+Vendor/
+App/Models/*.mlmodel
+App/Models/*.mlpackage

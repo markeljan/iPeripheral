@@ -31,6 +31,9 @@ final class PeripheralLink {
     /// What the phone's own ears last transcribed, and whether they are on.
     private(set) var phoneHeard: String?
     private(set) var earsState = "off"
+    /// Where the eyes look: the person in front of the screen (front camera), smoothed. Nil = wander.
+    private(set) var gaze: CGPoint?
+    private(set) var llmState = "idle"
     private var faceOverride: (face: Face, until: Date)?
     private var agentFace: Face = .idle
 
@@ -42,6 +45,8 @@ final class PeripheralLink {
 
     private let senses = Senses()
     private let voice = Voice()
+    private let model = LocalModel()
+    private let motion = Motion()
     private var conn: LinkConnection?
     private var loop: Task<Void, Never>?
     private var ears: AnyObject?
@@ -66,6 +71,63 @@ final class PeripheralLink {
         loop = Task { await run() }
         senses.start()
         startEars()
+        motion.onEvent = { [weak self] e in
+            Task { @MainActor in self?.motionEvent(e) }
+        }
+        motion.start()
+        Task { await gazeLoop() }
+        Task { await thermalLoop() }
+        Task {  // compile llama.cpp's Metal shaders while nobody is waiting (only if the text model is on the phone)
+            try? await Task.sleep(for: .seconds(20))
+            if ProcessInfo.processInfo.thermalState.rawValue <= ProcessInfo.ThermalState.fair.rawValue,
+                let m = ModelSpec.named("lfm3-1.7b")
+            {
+                model.warmUp(m)
+            }
+        }
+    }
+
+    /// Thermal governor. Serious: drop front-camera face tracking (the eyes wander instead). Critical: also refuse
+    /// on-device model runs (in runModel). Back to normal once the phone cools to fair.
+    private func thermalLoop() async {
+        applyThermal()
+        for await _ in NotificationCenter.default.notifications(named: ProcessInfo.thermalStateDidChangeNotification) {
+            applyThermal()
+        }
+    }
+
+    private func applyThermal() {
+        let t = ProcessInfo.processInfo.thermalState
+        if t == .serious || t == .critical {
+            senses.setFaceTracking(false)
+        } else if t == .nominal || t == .fair {
+            senses.setFaceTracking(true)
+        }
+        log.info("thermal \(t.rawValue): face tracking \(self.senses.faceTracking)")
+    }
+
+    /// 15 Hz: ease the eyes toward the viewer's face (or back to wandering when nobody has been seen for a second).
+    private func gazeLoop() async {
+        while !Task.isCancelled {
+            if let target = senses.viewerGaze() {
+                let g = gaze ?? .zero
+                gaze = CGPoint(x: g.x + (target.x - g.x) * 0.3, y: g.y + (target.y - g.y) * 0.3)
+            } else {
+                gaze = nil
+            }
+            try? await Task.sleep(for: .milliseconds(66))
+        }
+    }
+
+    private func motionEvent(_ e: Motion.Event) {
+        if e.kind == "fall" || e.kind == "impact" { faceOverride = (.sad, Date().addingTimeInterval(3)) }
+        let t = motion.tilt
+        send(.event(kind: e.kind, fields: ["value": .number(e.value), "tilt_deg": .number(t.deg.rounded())]))
+    }
+
+    private func send(_ m: Outgoing) {
+        guard let conn, case .connected = phase else { return }
+        Task { try? await conn.send(m) }
     }
 
     // ---- connection loop ----------------------------------------------------------------------------------------
@@ -107,7 +169,11 @@ final class PeripheralLink {
                 try await c.send(.pairRequest(device: device))
             }
             let status = Task { await statusLoop(c) }
-            defer { status.cancel() }
+            let poses = Task { await poseLoop(c) }
+            defer {
+                status.cancel()
+                poses.cancel()
+            }
             for try await msg in c.messages() {
                 await handle(msg, on: c, url: url)
             }
@@ -137,7 +203,7 @@ final class PeripheralLink {
             agentEvent(ev)
         case .request(let rid, let op, let args):
             requestsServed += 1
-            await answer(rid: rid, op: op, args: args, on: c)
+            Task { await answer(rid: rid, op: op, args: args, on: c) }  // a slow one (llm) mustn't block the rest
         case .vocabulary(let words):
             listener.setVocabulary(Listener.baseVocabulary + words)
             if #available(iOS 26, *), let e = ears as? Ears { Task { await e.setVocabulary(words) } }
@@ -216,17 +282,61 @@ final class PeripheralLink {
                 senses.resetOrigin()
                 try await c.send(.reply(rid: rid, ok: true))
             case "detect":
-                let kinds = Set(args["kinds"]?.array?.compactMap(\.string) ?? Senses.detectKinds)
+                let kinds = Set(args["kinds"]?.array?.compactMap(\.string) ?? Senses.defaultKinds)
                 let r = try await off { try $0.detect(kinds: kinds) }
                 let objects: [JSONValue] = r.objects.map { d in
-                    [
+                    var o: [String: JSONValue] = [
                         "kind": .string(d.kind), "x": .number(cm(d.x)), "y": .number(cm(d.y)),
                         "w": .number(cm(d.w)), "h": .number(cm(d.h)), "confidence": .number(cm(d.confidence)),
-                        "m": d.metres.map { .number($0) } ?? .null,
+                        "m": d.metres.map { .number($0) } ?? .null, "bearing_deg": .number(d.bearingDeg.rounded()),
+                        "elevation_deg": .number(d.elevationDeg.rounded()),
                     ]
+                    if let l = d.label { o["label"] = .string(l) }
+                    if let w = d.world {
+                        o["world"] = [.number(cm(Double(w.x))), .number(cm(Double(w.y))), .number(cm(Double(w.z)))]
+                    }
+                    return .object(o)
                 }
                 try await c.send(
                     .reply(rid: rid, ok: true, fields: ["objects": .array(objects), "age_s": .number(ms(r.age))]))
+            case "ground":
+                let g = try await off { try $0.ground() }
+                let lanes: [JSONValue] = g.lanes.map { l in
+                    [
+                        "lane": .string(l.name), "clear_m": l.clearM.map { .number($0) } ?? .null,
+                        "edge_m": l.edgeM.map { .number($0) } ?? .null, "drop_m": l.dropM.map { .number($0) } ?? .null,
+                        "obstacle_m": l.obstacleM.map { .number($0) } ?? .null,
+                    ]
+                }
+                try await c.send(
+                    .reply(
+                        rid: rid, ok: true,
+                        fields: [
+                            "surface_below_m": g.surfaceBelowM.map { .number($0) } ?? .null, "lanes": .array(lanes),
+                            "age_s": .number(ms(g.age)),
+                        ]))
+            case "motion":
+                let t = motion.tilt
+                try await c.send(
+                    .reply(
+                        rid: rid, ok: true,
+                        fields: [
+                            "tilt_deg": .number(t.deg.rounded()), "roll_deg": .number(t.rollDeg.rounded()),
+                            "fallen": .bool(t.fallen),
+                        ]))
+            case "llm":
+                try await c.send(.reply(rid: rid, ok: true, fields: try await runModel(args)))
+            case "models":
+                try await c.send(.reply(rid: rid, ok: true, fields: modelsStatus()))
+            case "model_download":
+                guard let m = args["model"]?.string.flatMap(ModelSpec.named) else {
+                    throw LinkError("unknown model; one of \(ModelSpec.all.map(\.id).joined(separator: ", "))")
+                }
+                model.download(m)
+                try await c.send(.reply(rid: rid, ok: true, fields: modelsStatus()))
+            case "model_unload":
+                model.unload()
+                try await c.send(.reply(rid: rid, ok: true))
             case "say":
                 voice.say(args["text"]?.string ?? "")
                 try await c.send(.reply(rid: rid, ok: true))
@@ -249,10 +359,95 @@ final class PeripheralLink {
         }
     }
 
+    // ---- on-device model -------------------------------------------------------------------------------------
+
+    private func runModel(_ args: [String: JSONValue]) async throws -> [String: JSONValue] {
+        let useImage = args["image"]?.bool ?? false
+        let id = args["model"]?.string ?? (useImage ? "lfm3-vl-2b" : "lfm3-1.7b")
+        guard let spec = ModelSpec.named(id) else {
+            throw LinkError("unknown model; one of \(ModelSpec.all.map(\.id).joined(separator: ", "))")
+        }
+        guard ProcessInfo.processInfo.thermalState != .critical else { throw LocalModel.Failure.tooHot }
+        var messages: [LocalModel.Message] = (args["messages"]?.array ?? []).compactMap { m in
+            guard let role = m["role"]?.string, let content = m["content"]?.string else { return nil }
+            return (role, content)
+        }
+        if messages.isEmpty {
+            guard let prompt = args["prompt"]?.string, !prompt.isEmpty else { throw LinkError("prompt is required") }
+            if let system = args["system"]?.string, !system.isEmpty { messages.append(("system", system)) }
+            messages.append(("user", prompt))
+        }
+        var image: (rgb: [UInt8], width: Int, height: Int)?
+        if useImage {
+            guard spec.vision else { throw LinkError("\(id) has no vision; use lfm3-vl-2b") }
+            let side = min(1024, max(256, args["image_side"]?.int ?? 512))  // smaller = fewer image tokens = faster
+            image = try await off { try $0.rgb(maxSide: side) }
+        }
+        var options = LocalModel.Options()
+        options.maxTokens = min(2048, max(1, args["max_tokens"]?.int ?? 256))
+        options.thinking = args["thinking"]?.bool ?? false
+        options.gpu = args["backend"]?.string != "cpu"
+        llmState = "running \(id)"
+        defer { llmState = "idle" }
+        let face = agentFace
+        agentFace = .thinking
+        defer { agentFace = face }
+        let out = try await model.generate(
+            model: spec, messages: messages, image: image, options: options)
+        log.info(
+            "llm \(id, privacy: .public): \(out.promptTokens) + \(out.generatedTokens) tokens, \(Int(out.decodeTokensPerSecond)) tok/s"
+        )
+        return [
+            "text": .string(out.text), "thinking": out.thinking.map { .string($0) } ?? .null,
+            "model": .string(out.model), "backend": .string(out.backend),
+            "prompt_tokens": .number(Double(out.promptTokens)),
+            "generated_tokens": .number(Double(out.generatedTokens)),
+            "prefill_tok_s": .number(out.prefillTokensPerSecond.rounded()),
+            "decode_tok_s": .number((out.decodeTokensPerSecond * 10).rounded() / 10),
+            "load_s": .number(ms(out.loadSeconds)), "total_s": .number(ms(out.totalSeconds)),
+        ]
+    }
+
+    private func modelsStatus() -> [String: JSONValue] {
+        let dl = model.downloads.snapshot()
+        let models: [JSONValue] = ModelSpec.all.map { m in
+            var o: [String: JSONValue] = [
+                "id": .string(m.id), "file": .string(m.file), "vision": .bool(m.vision),
+                "downloaded": .bool(LocalModel.isDownloaded(m)), "loaded": .bool(model.loaded == m.id),
+                "size_mb": .number(Double((m.bytes + m.mmprojBytes) / 1_000_000)),
+            ]
+            let files = [m.file] + (m.mmproj.map { [$0] } ?? [])
+            let parts = files.compactMap { dl[$0] }
+            if !parts.isEmpty {
+                let got = parts.map(\.received).reduce(0, +)
+                let want = parts.map(\.expected).reduce(0, +)
+                o["downloading"] = .number(want > 0 ? (Double(got) / Double(want) * 100).rounded() : 0)
+                if let e = parts.compactMap(\.error).first { o["error"] = .string(e) }
+            }
+            return .object(o)
+        }
+        return ["models": .array(models), "runtime": "llama.cpp b11988 (Metal)"]
+    }
+
     /// Runs a Senses query off the main actor (image encoding and Vision take tens of ms).
     private func off<T: Sendable>(_ body: @escaping @Sendable (Senses) throws -> T) async throws -> T {
         let s = senses
         return try await Task.detached { try body(s) }.value
+    }
+
+    /// 10 Hz pose stream, so the bridge answers phone_pose instantly and can follow a turn or walk closely.
+    private func poseLoop(_ c: LinkConnection) async {
+        while !Task.isCancelled {
+            if case .connected = phase, let p = try? senses.pose() {
+                try? await c.send(
+                    .pose(fields: [
+                        "x": .number(cm(p.x)), "y": .number(cm(p.y)), "z": .number(cm(p.z)),
+                        "yaw_deg": .number((p.yawDeg * 10).rounded() / 10), "pitch_deg": .number(p.pitchDeg.rounded()),
+                        "tracking": .string(p.tracking),
+                    ]))
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
     }
 
     private func statusLoop(_ c: LinkConnection) async {
@@ -282,8 +477,9 @@ final class PeripheralLink {
             battery: d.batteryLevel >= 0 ? Double(d.batteryLevel) : nil,
             charging: d.batteryState == .charging || d.batteryState == .full,
             thermal: thermal,
-            caps: (cameraOn ? ["camera", "pose", "detect"] + (Senses.hasLiDAR ? ["depth"] : []) : [])
-                + (listening ? ["voice"] : []) + ["say", "face"])
+            caps: (cameraOn ? ["camera", "pose", "detect"] + (Senses.hasLiDAR ? ["depth", "ground"] : []) : [])
+                + (Senses.hasObjectModel ? ["objects"] : []) + (listening ? ["voice", "sounds"] : [])
+                + (LocalModel.available ? ["llm"] : []) + ["motion", "say", "face"])
     }
 
     // ---- voice ------------------------------------------------------------------------------------------------
@@ -298,6 +494,11 @@ final class PeripheralLink {
         listener.setVocabulary(Listener.baseVocabulary)
         e.onText = { [weak self] text, isFinal in
             Task { @MainActor in self?.heard(text, isFinal: isFinal) }
+        }
+        e.onSound = { [weak self] label, confidence in
+            Task { @MainActor in
+                self?.send(.event(kind: "sound", fields: ["label": .string(label), "confidence": .number(confidence)]))
+            }
         }
         earsState = "starting"
         Task {

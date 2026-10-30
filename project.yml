@@ -19,6 +19,8 @@ targets:
     sources:
       - App/Sources
       - App/Resources
+      - path: App/Models
+        optional: true
     configFiles:
       Debug: App/Config/Signing.xcconfig
       Release: App/Config/Signing.xcconfig
@@ -30,6 +32,22 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: NO
+        # llama.cpp (scripts/fetch-vendor.sh): linked for device builds only, its release has no Simulator slice.
+        # Swift code checks `canImport(llama)`, so Simulator builds get a stub.
+        FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]: $(SRCROOT)/Vendor
+        OTHER_LDFLAGS[sdk=iphoneos*]: -framework llama
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    postBuildScripts:
+      - name: Embed llama.framework (device)
+        basedOnDependencyAnalysis: false
+        script: |
+          [ "$PLATFORM_NAME" = iphoneos ] || exit 0
+          dest="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
+          mkdir -p "$dest"
+          rsync -a --delete "$SRCROOT/Vendor/llama.framework" "$dest/"
+          if [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
+            codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --preserve-metadata=identifier,entitlements "$dest/llama.framework"
+          fi
     info:
       path: App/Info.plist
       properties:

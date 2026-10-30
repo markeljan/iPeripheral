@@ -1,10 +1,12 @@
 @preconcurrency import AVFoundation
 import Foundation
+@preconcurrency import SoundAnalysis
 import Speech
 import TonyLink
 
 /// The phone's microphones → on-device speech-to-text (SpeechAnalyzer, iOS 26+). Reports every transcript update;
 /// deciding what is a command is `Listener`'s job. Voice processing is on, so the phone's own TTS is mostly cancelled.
+/// The same audio also goes to Apple's built-in sound classifier (~300 sounds) for `onSound` events.
 @available(iOS 26, *)
 final class Ears: @unchecked Sendable {
     enum Failure: Error, CustomStringConvertible {
@@ -20,6 +22,20 @@ final class Ears: @unchecked Sendable {
 
     /// (text, isFinal). Called on an arbitrary task.
     var onText: (@Sendable (String, Bool) -> Void)?
+    /// (sound label, confidence) for the sounds worth telling the robot about. Called on the sound queue.
+    var onSound: (@Sendable (String, Double) -> Void)?
+
+    /// Sounds reported as events. Speech, music and silence are left out: they are constant and not events.
+    static let soundsOfInterest: Set<String> = [
+        "clapping", "finger_snapping", "applause", "cheering", "laughter", "baby_laughter", "shout", "yell",
+        "screaming", "crying_sobbing", "baby_crying", "whistling", "door_bell", "knock", "door_slam", "dog_bark",
+        "dog_growl", "cat_meow", "smoke_detector", "alarm_clock", "siren", "police_siren", "ambulance_siren",
+        "fire_engine_siren", "glass_breaking", "telephone_bell_ringing", "ringtone", "thump_thud", "boom",
+        "gunshot_gunfire", "fireworks", "basketball_bounce", "beep",
+    ]
+    private let soundQueue = DispatchQueue(label: "sounds")
+    private var sounds: SNAudioStreamAnalyzer?
+    private var soundObserver: SoundObserver?
 
     private let engine = AVAudioEngine()
     private var analyzer: SpeechAnalyzer?
@@ -76,8 +92,19 @@ final class Ears: @unchecked Sendable {
         try? mic.setVoiceProcessingEnabled(true)  // echo cancellation: don't transcribe our own voice
         let micFormat = mic.outputFormat(forBus: 0)
         guard let converter = AVAudioConverter(from: micFormat, to: format) else { throw Failure.noFormat }
-        mic.installTap(onBus: 0, bufferSize: 4096, format: micFormat) { buffer, _ in
+        let sounds = SNAudioStreamAnalyzer(format: micFormat)
+        if let req = try? SNClassifySoundRequest(classifierIdentifier: .version1), let onSound {
+            req.windowDuration = CMTime(seconds: 1, preferredTimescale: 48_000)
+            req.overlapFactor = 0.5
+            let obs = SoundObserver(onSound)
+            try? sounds.add(req, withObserver: obs)
+            soundObserver = obs
+        }
+        self.sounds = sounds
+        let soundQueue = soundQueue
+        mic.installTap(onBus: 0, bufferSize: 4096, format: micFormat) { buffer, when in
             if let b = Self.convert(buffer, with: converter, to: format) { cont.yield(AnalyzerInput(buffer: b)) }
+            soundQueue.async { sounds.analyze(buffer, atAudioFramePosition: when.sampleTime) }
         }
         engine.prepare()
         try engine.start()
@@ -112,5 +139,24 @@ final class Ears: @unchecked Sendable {
             return buffer
         }
         return error == nil && out.frameLength > 0 ? out : nil
+    }
+}
+
+/// Turns sound-classifier results into `onSound` calls: confident (> 0.7), interesting, at most every 3 s per sound.
+@available(iOS 26, *)
+private final class SoundObserver: NSObject, SNResultsObserving, @unchecked Sendable {
+    private let report: @Sendable (String, Double) -> Void
+    private var last: [String: Date] = [:]
+
+    init(_ report: @escaping @Sendable (String, Double) -> Void) { self.report = report }
+
+    func request(_ request: SNRequest, didProduce result: SNResult) {
+        guard let r = result as? SNClassificationResult, let top = r.classifications.first, top.confidence > 0.7,
+            Ears.soundsOfInterest.contains(top.identifier)
+        else { return }
+        let now = Date()
+        if let t = last[top.identifier], now.timeIntervalSince(t) < 3 { return }
+        last[top.identifier] = now
+        report(top.identifier, (top.confidence * 100).rounded() / 100)
     }
 }

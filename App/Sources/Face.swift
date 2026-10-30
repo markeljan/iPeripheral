@@ -4,9 +4,11 @@ enum Face: String, CaseIterable, Sendable {
     case idle, listening, thinking, speaking, happy, sad, warn, asleep, offline
 }
 
-/// Tony's face: two eyes on black. Blinks on its own; shape and colour follow the mood.
+/// Tony's face: two eyes on black. Blinks on its own; shape and colour follow the mood. The eyes look toward `gaze`
+/// (-1…1, x right, y down: the person looking at the screen) or wander slowly when nobody is there.
 struct FaceView: View {
     let face: Face
+    var gaze: CGPoint? = nil
 
     var body: some View {
         TimelineView(.animation) { timeline in
@@ -46,10 +48,15 @@ struct FaceView: View {
         default: break
         }
         if blink && face != .asleep && face != .offline { eyeH = eyeW * 0.08 }
+        let look =
+            gaze
+            ?? CGPoint(x: 0.35 * sin(t * 0.23) + 0.15 * sin(t * 0.71), y: 0.25 * sin(t * 0.17))
+        let lookX = face == .offline || face == .asleep ? 0 : look.x * w * 0.08
+        let lookY = face == .offline || face == .asleep ? 0 : look.y * h * 0.05
 
         for side in [-1.0, 1.0] {
-            let cx = w / 2 + CGFloat(side) * (gap / 2 + eyeW / 2)
-            let rect = CGRect(x: cx - eyeW / 2, y: cy - eyeH / 2 + dy, width: eyeW, height: eyeH)
+            let cx = w / 2 + CGFloat(side) * (gap / 2 + eyeW / 2) + lookX
+            let rect = CGRect(x: cx - eyeW / 2, y: cy - eyeH / 2 + dy + lookY, width: eyeW, height: eyeH)
             ctx.fill(Path(roundedRect: rect, cornerRadius: min(eyeW, eyeH) / 2), with: .color(color))
         }
         if face == .speaking {  // mouth bar that moves while talking

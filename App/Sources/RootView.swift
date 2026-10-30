@@ -8,7 +8,7 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            FaceView(face: link.face)
+            FaceView(face: link.face, gaze: link.gaze)
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture { link.stop() }
@@ -76,6 +76,7 @@ struct DebugOverlay: View {
                 if let h = r.hottest { row("hottest", "\(h.joint) \(Int(h.celsius)) °C") }
             }
             row("ears", link.earsState)
+            row("model", link.llmState)
             row("phone heard", link.phoneHeard ?? "–")
             row("agent heard", link.lastHeard ?? "–")
             row("said", link.lastSaid ?? "–")

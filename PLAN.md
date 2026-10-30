@@ -99,7 +99,9 @@ image orientation, depth left/right/up/down, and person/face/hand boxes line up;
 distance; Vision person/ball detection → `phone_detect`. Closed-loop "walk to that": detect → head track → walk until
 depth < 40 cm, correcting heading from ARKit, not step counts. *Done when:* Tony walks to a ball 2 m away and stops.
 
-**P5 — Phone as compute.** Benchmark LFM2.5-1.2B / LFM3-1.7B / LFM3-VL on the A16 (MLX Swift or llama.cpp Metal)
+**P5 — Phone as compute. [LFM3-1.7B and LFM3-VL-2B (official QAD Q4_0 GGUFs) run on the phone via llama.cpp b11988 on
+Metal; MCP `phone_llm`, `phone_look_and_ask`, and an OpenAI-compatible `/v1/chat/completions` on the bridge; benchmark
+vs the Pi still to do]** Benchmark LFM2.5-1.2B / LFM3-1.7B / LFM3-VL on the A16 (MLX Swift or llama.cpp Metal)
 against the Pi's llama-server, in the model test bench. If faster, the phone serves an OpenAI-compatible endpoint the
 local agent can point at. Hermes uses the phone tools once the MVP session lands Hermes.
 

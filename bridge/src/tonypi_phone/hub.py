@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import itertools
 import json
 import logging
 import struct
+import time
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +37,8 @@ class PhoneHub:
         self.ws = None
         self.device: str | None = None
         self.status: dict = {}
+        self.pose: dict | None = None  # latest streamed pose, with "t" = time.monotonic() when it arrived
+        self.events: collections.deque[dict] = collections.deque(maxlen=100)  # falls, impacts, sounds; newest last
         self._rids = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
 
@@ -45,7 +49,7 @@ class PhoneHub:
     async def attach(self, ws, device: str) -> None:
         """A newly authenticated phone replaces the old one."""
         old = self.ws
-        self.ws, self.device, self.status = ws, device, {}
+        self.ws, self.device, self.status, self.pose = ws, device, {}, None
         if old is not None and old is not ws:
             await old.close(4000, "replaced by a newer connection")
 
@@ -85,6 +89,17 @@ class PhoneHub:
         if not header.get("ok"):
             raise PhoneError(header.get("error", "error"))
         return header, payload
+
+    def fresh_pose(self, max_age_s: float = 0.5) -> dict | None:
+        if self.pose is None or time.monotonic() - self.pose["t"] > max_age_s:
+            return None
+        return {k: v for k, v in self.pose.items() if k not in ("type", "t")} | {
+            "age_s": round(time.monotonic() - self.pose["t"], 3)}
+
+    def recent_events(self, since_s: float, kinds: set[str] | None = None) -> list[dict]:
+        now = time.monotonic()
+        return [{k: v for k, v in e.items() if k not in ("type", "t")} | {"ago_s": round(now - e["t"], 1)}
+                for e in self.events if now - e["t"] <= since_s and (kinds is None or e.get("kind") in kinds)]
 
     def on_reply(self, header: dict, payload: bytes | None = None) -> None:
         fut = self._pending.get(header.get("rid"))

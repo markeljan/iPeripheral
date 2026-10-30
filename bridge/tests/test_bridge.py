@@ -172,7 +172,9 @@ async def test_snapshot_request_over_binary_frame(rig):
         assert header["mime"] == "image/jpeg" and payload == b"\xff\xd8jpeg"
         names = {t.name for t in await mcp.list_tools()}
         assert names == {"phone_status", "phone_snapshot", "phone_say", "set_face", "phone_depth_at",
-                         "phone_obstacles", "phone_pose", "phone_reset_origin", "phone_detect"}
+                         "phone_obstacles", "phone_pose", "phone_reset_origin", "phone_detect", "phone_find",
+                         "phone_read_text", "phone_ground_check", "phone_motion", "phone_events", "phone_llm",
+                         "phone_look_and_ask", "phone_models", "phone_model_download"}
 
 
 async def test_newer_phone_replaces_older(rig):
@@ -221,3 +223,77 @@ async def test_obstacles_tool_shapes_the_depth_grid(rig):
         await answer
         text = json.dumps(result, default=lambda o: getattr(o, "text", str(o)))
         assert '\\"nearest_m\\": 0.45' in text and '\\"centre\\": 0.8' in text
+
+
+async def authed(bridge, url):
+    token = bridge.tokens.issue("test phone")
+    ws = await connect(url)
+    await ws.send(json.dumps({"type": "hello", "v": 1, "token": token}))
+    await recv_type(ws, "welcome")
+    return ws
+
+
+def tool_json(result) -> dict:
+    """MCPServer.call_tool result -> the tool's dict (first text content)."""
+    return json.loads(result.content[0].text)
+
+
+async def test_pose_stream_is_cached_and_events_kept(rig):
+    bridge, _, _, url = rig
+    mcp = build_mcp(bridge.hub)
+    ws = await authed(bridge, url)
+    await ws.send(json.dumps({"type": "pose", "x": 1.0, "y": 0.2, "z": -0.5, "yaw_deg": 30.5, "tracking": "normal"}))
+    await ws.send(json.dumps({"type": "event", "kind": "fall", "value": 75, "tilt_deg": 75}))
+    await ws.send(json.dumps({"type": "event", "kind": "sound", "label": "clapping", "confidence": 0.9}))
+    await asyncio.sleep(0.1)
+    pose = tool_json(await mcp.call_tool("phone_pose", {}))  # no request to the phone: answered from the stream
+    assert pose["yaw_deg"] == 30.5 and pose["tracking"] == "normal" and pose["age_s"] < 0.5
+    events = tool_json(await mcp.call_tool("phone_events", {}))["events"]
+    assert [e["kind"] for e in events] == ["fall", "sound"] and events[1]["label"] == "clapping"
+    await ws.close()
+
+
+async def test_find_picks_nearest_matching_object(rig):
+    bridge, _, _, url = rig
+    mcp = build_mcp(bridge.hub)
+    ws = await authed(bridge, url)
+
+    async def phone():
+        req = await recv_type(ws, "request")
+        assert req["op"] == "detect" and req["kinds"] == ["objects", "animals"]
+        objs = [{"kind": "objects", "label": "sports ball", "x": 0.1, "y": 0.5, "w": 0.1, "h": 0.1, "m": 3.0,
+                 "bearing_deg": 20},
+                {"kind": "objects", "label": "sports ball", "x": 0.6, "y": 0.6, "w": 0.1, "h": 0.1, "m": 1.2,
+                 "bearing_deg": -8},
+                {"kind": "objects", "label": "cup", "x": 0.5, "y": 0.5, "w": 0.1, "h": 0.1, "m": 0.5}]
+        await ws.send(json.dumps({"type": "reply", "rid": req["rid"], "ok": True, "objects": objs}))
+
+    answer = asyncio.create_task(phone())
+    found = tool_json(await mcp.call_tool("phone_find", {"target": "ball"}))
+    await answer
+    assert found["found"] and found["matches"] == 2 and found["m"] == 1.2 and found["bearing_deg"] == -8
+    await ws.close()
+
+
+async def test_openai_chat_completions_runs_on_the_phone(rig):
+    import httpx2 as httpx  # what the mcp SDK ships
+    bridge, _, _, url = rig
+    app = build_mcp(bridge.hub).streamable_http_app()
+    ws = await authed(bridge, url)
+
+    async def phone():
+        req = await recv_type(ws, "request")
+        assert req["op"] == "llm" and req["model"] == "lfm3-1.7b"
+        assert req["messages"] == [{"role": "system", "content": "be brief"}, {"role": "user", "content": "hi"}]
+        await ws.send(json.dumps({"type": "reply", "rid": req["rid"], "ok": True, "text": "Hello!",
+                                  "model": "lfm3-1.7b", "prompt_tokens": 12, "generated_tokens": 3}))
+
+    answer = asyncio.create_task(phone())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        r = await client.post("/v1/chat/completions", json={"model": "lfm3-1.7b", "messages": [
+            {"role": "system", "content": "be brief"}, {"role": "user", "content": [{"type": "text", "text": "hi"}]}]})
+    await answer
+    body = r.json()
+    assert r.status_code == 200 and body["choices"][0]["message"]["content"] == "Hello!"
+    assert body["usage"]["total_tokens"] == 15
+    await ws.close()

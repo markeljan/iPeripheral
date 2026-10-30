@@ -11,6 +11,14 @@
       "env": {
         "MOBILEBUILDMCP_SENTRY_DISABLED": "true"
       }
+    },
+    "xcode": {
+      "type": "stdio",
+      "command": "xcrun",
+      "args": [
+        "mcpbridge"
+      ],
+      "env": {}
     }
   }
 }

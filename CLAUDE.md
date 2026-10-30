@@ -10,8 +10,11 @@ detection, ground/edge check, IMU, mic, sound events), its face, and a small on-
   pose + Vision); `Ears.swift` is on-device speech (iOS 26 SpeechAnalyzer), and `Listener` in TonyLink turns transcripts
   into stop / wake / command. `LocalModel.swift` runs LFM3-1.7B / LFM3-VL-2B (llama.cpp, Metal; GGUFs downloaded to the
   phone on request), `Motion.swift` is the IMU (fall/impact events). Tap on the face = stop the body.
+  Two modes: mounted (on Tony: his senses and face) and companion (off Tony, watching him: tracks him, streams frames
+  the bridge records as episodes in `bridge/src/tonypi_phone/recorder.py`). PLAN.md P6.
 - `Packages/TonyLink/` protocol types + WebSocket client + Bonjour browser. `cd Packages/TonyLink && swift test`.
-- `bridge/` Python package `tonypi-phone` that runs on the Pi (WS :8766 on the LAN, MCP on 127.0.0.1:8767).
+- `bridge/` Python package `tonypi-phone` that runs on the Pi (WS :8766 on the LAN, MCP on 127.0.0.1:8767). It talks
+  to tonyd, tonypi-voice (live mode: `say`, `text`; never `attach`) and tonypi-agent (when voice isn't running).
   `cd bridge && uv run pytest` (fake tonyd/agent sockets, no robot needed).
 - `deploy/` systemd unit, Bonjour advert, `install.sh` (rsync + uv sync + restart on `tonypi`).
 - `scripts/fetch-vendor.sh` (run by build-and-install) puts pinned llama.cpp into `Vendor/` (gitignored, device slice

@@ -41,7 +41,8 @@ The bridge stores only a SHA-256 of each token (`~/.config/tonypi-phone/tokens.j
 | `pose` | `x,y,z,yaw_deg,pitch_deg,tracking` (as the `pose` request) | ~10 Hz while connected; the bridge caches the latest |
 | `event` | `kind` + fields: `fall`/`impact`/`freefall`/`upright` (`value`, `tilt_deg`) from the phone IMU; `sound` (`label`, `confidence`) from the built-in sound classifier | as they happen; the bridge keeps the last 100 |
 | `transcript` | `text` | every finished phrase the phone heard (logged by the bridge; for tuning, not acted on) |
-| `status` | `battery` 0–1, `charging`, `thermal` (`nominal/fair/serious/critical`), `caps` [..] | phone health, every ~5 s |
+| `status` | `battery` 0–1, `charging`, `thermal` (`nominal/fair/serious/critical`), `caps` [..], `mode` (`mounted`/`companion`) | phone health, every ~5 s and on a mode change |
+| `frame` (binary) | header `seq`, `t` (phone clock, s), `width`, `height`, `tracked` (as `track`'s, or null), `pose` {x,y,z,yaw_deg,tracking}; payload JPEG | while a `stream` request is on |
 | `reply` | `rid`, `ok`, `error?`, … | answer to a bridge `request` (binary frame when it carries a blob) |
 
 ## Bridge → phone
@@ -73,6 +74,9 @@ The bridge stores only a SHA-256 of each token (`~/.config/tonypi-phone/tokens.j
 | `models` | | `models` [{id,file,vision,downloaded,loaded,size_mb,downloading?%,error?}], `runtime` |
 | `model_download` | `model` | starts the download (Hugging Face, ~1 GB); same reply as `models` |
 | `model_unload` | | frees the loaded model |
+| `mode` | `mode` (`mounted`/`companion`), omitted = just ask | the `status` fields. Companion = the phone is off Tony, watching him: no face or gaze, no `ground`, no IMU events (they'd be the phone's), the screen shows the camera |
+| `track` | `target` (description, default "the small humanoid robot") or `box` [x,y,w,h]; `refind` (default true); `stop` | `tracking`, `tracked` {kind: `tracked`, label, x,y,w,h, confidence, lost, m, bearing_deg, world}. Vision `VNTrackObjectRequest` at 10 Hz, seeded by `locate` (or the box); lost (confidence < 0.3) for 2 s → `locate` again, at most every 10 s |
+| `stream` | `fps` (0–10, 0 = stop), `max_side` (default 640), `quality` (default 0.6) | `fps`; then binary `frame` messages until `fps` 0 or the connection ends |
 
 Image coordinates (`x,y,w,h`) are 0–1 in the portrait snapshot image, origin top-left. Depth is LiDAR (ARKit
 `smoothedSceneDepth`, 256×192), median of a small patch, low-confidence pixels dropped; `m` is null when nothing is
@@ -91,9 +95,19 @@ repeat penalty 1.1. One model is loaded at a time; `llm` requests are refused wh
   `{"event":"job"|"warn",…}`.
 - agent: `/run/tonypi/agent.sock`, JSON lines; send `{"text":"…"}` (command) or `{"op":"say","text":"…"}`; every
   connected client gets the agent's events `{"type":…}`.
+- voice: `/run/tonypi/voice.sock` (tonypi-voice: live mode and the harness slots; never runs with the agent), JSON
+  lines with `rid`. The bridge uses `say` and `text` (`source: "phone"`, live mode only) and never `attach` (that's the
+  brain's). Commands and spoken pairing codes go to voice when it's up, else to the agent.
+- Episodes (`recorder.py`): `~/.local/share/tonypi-phone/episodes/<time>-<label>/` with `frames/*.jpg`,
+  `frames.jsonl`, `body.jsonl` (tonyd `state` + `joints` at `joints_hz`), `jobs.jsonl`, `meta.json`
+  (`target_moved_m` from the tracked world positions). Auto-recording keeps 1 s of pre-roll and 1 s of tail per job.
+  The phone streams at the highest rate any user needs (recording, auto-recording, `/live` viewers), else not at all.
 - MCP: `http://127.0.0.1:8767/mcp` (Streamable HTTP, localhost only): `phone_status`, `phone_snapshot`,
   `phone_detect`, `phone_find`, `phone_locate`, `phone_read_text`, `phone_depth_at`, `phone_obstacles`, `phone_ground_check`,
   `phone_pose` (from the 10 Hz stream), `phone_reset_origin`, `phone_motion`, `phone_events`, `phone_llm`,
-  `phone_look_and_ask`, `phone_models`, `phone_model_download`, `phone_say`, `set_face`.
+  `phone_look_and_ask`, `phone_models`, `phone_model_download`, `phone_gaze`, `phone_face_tracking`, `phone_say`,
+  `set_face`; companion: `phone_mode`, `phone_track`, `phone_record`, `phone_record_jobs`, `phone_episodes`,
+  `phone_episode_review` (a contact sheet of N frames with the tracked box, plus the summary).
+- Live view: `GET http://127.0.0.1:8767/live`, MJPEG for a browser (the phone streams at 5 fps while someone watches).
 - OpenAI-compatible: `POST http://127.0.0.1:8767/v1/chat/completions` (non-streaming, text) and `GET /v1/models`,
   answered by the phone's LFM3 via the `llm` op, so a local agent can use the phone as its model server.

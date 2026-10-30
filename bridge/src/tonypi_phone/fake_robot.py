@@ -50,14 +50,17 @@ class FakeTonyd:
                 "camera": {"ok": True}, "fake": True}
 
     async def _run(self, skill: str, seconds: float) -> None:
-        self.job = {"id": next(self._ids), "skill": skill, "state": "running"}
-        await self.subs.broadcast({"event": "job", "job": dict(self.job)})
+        # Shaped like tonyd's Job.public(), sent flat in the event like tonyd's emit("job", **job.public()).
+        self.job = {"id": next(self._ids), "skill": skill, "count": 1, "state": "running", "said": [],
+                    "error": None, "started": time.time(), "seconds": None}
+        await self.subs.broadcast({"event": "job", "t": round(time.time(), 2), **self.job})
         try:
             await asyncio.sleep(seconds)
             self.job["state"] = "done"
         except asyncio.CancelledError:
-            self.job["state"] = "stopped"
-        await self.subs.broadcast({"event": "job", "job": dict(self.job)})
+            self.job["state"] = "cancelled"
+        self.job |= {"seconds": round(time.time() - self.job["started"], 2), "max_tilt_deg": 4.2, "yaw_deg": 0.0}
+        await self.subs.broadcast({"event": "job", "t": round(time.time(), 2), **self.job})
         log.info("job %s %s", skill, self.job["state"])
         self.job = None
 
@@ -65,8 +68,11 @@ class FakeTonyd:
         op = msg.get("op")
         if op == "ping":
             return {"pong": True}
-        if op == "skills":
-            return {"skills": sorted(SKILLS)}
+        if op == "skills":  # tonyd: name -> description, plus details
+            return {"skills": {k: f"fake {k}" for k in sorted(SKILLS)}, "max_count": 5}
+        if op == "joints":
+            pos = {str(i): 500 for i in range(1, 17)}
+            return {"raw": pos, "pos": pos}
         if op == "state":
             return {"state": self.state()}
         if op == "subscribe":

@@ -114,6 +114,17 @@ vs the Pi still to do]** Benchmark LFM2.5-1.2B / LFM3-1.7B / LFM3-VL on the A16 
 against the Pi's llama-server, in the model test bench. If faster, the phone serves an OpenAI-compatible endpoint the
 local agent can point at. Hermes uses the phone tools once the MVP session lands Hermes.
 
+**P6 — Companion mode. [built 2026-10-30; checked against the fake robot, not yet with Tony in view]** The same app,
+off the robot: on a stand (or in a hand) watching Tony from outside, so a brain can see its own body. The tonypi body
+experiments record "no visual observation of actual joint direction, binding or clearance": this is that observer.
+Mode switch in the debug overlay, `-mode companion`, or `phone_mode`. `phone_track` follows Tony (LFM3-VL finds him,
+Vision tracks at 10 Hz, re-finds when lost); `phone_record` / `phone_record_jobs` record episodes (camera frames with
+the tracked box and world position, tonyd state + joints, job results incl. `max_tilt_deg`/`yaw_deg`) for judging a
+new move, measuring a walk from outside (`target_moved_m`), and training data later; `phone_episode_review` returns a
+contact sheet. `/live` is an MJPEG view for a person. The phone's mic still takes "Tony …" commands from across the
+room (to tonypi-voice in live mode). *Done when:* a brain records `wave` and a 3-step walk from outside, and the
+review shows the arm and the distance walked matches a tape measure within 10 cm.
+
 ## Human steps (things I can't do)
 1. Plug the iPhone 14 Pro into this Mac, unlock it, tap **Trust**.
 2. iPhone: Settings → Privacy & Security → **Developer Mode** → on (reboots; confirm again).

@@ -3,7 +3,7 @@ name = "tonypi-phone"
 version = "0.1.0"
 description = "Bridge between Tony's mounted iPhone and the TonyPi robot (tonyd + agent sockets), plus an MCP server for the phone's senses"
 requires-python = ">=3.11"
-dependencies = ["mcp>=2.3", "websockets>=15"]
+dependencies = ["mcp>=2.3", "websockets>=15", "pillow>=11"]
 
 [project.scripts]
 tonypi-phone = "tonypi_phone.main:main"

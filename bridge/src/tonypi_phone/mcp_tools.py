@@ -1,11 +1,13 @@
 """MCP server for the phone's senses (Streamable HTTP, localhost only). Brains add it next to tonypi-mcp.
 
 The same server also answers OpenAI-style `/v1/chat/completions` with the phone's on-device LFM3, so a local agent on
-the Pi can use the phone as its model server (localhost only, like the MCP endpoint).
+the Pi can use the phone as its model server, and `/live` streams the phone camera as MJPEG for a person watching
+(localhost only, like the MCP endpoint: `ssh -L 8767:127.0.0.1:8767 tonypi`, then http://127.0.0.1:8767/live).
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 
@@ -13,9 +15,10 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.utilities.types import Image
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 
 from tonypi_phone.hub import PhoneError, PhoneHub
+from tonypi_phone.recorder import Recorder, RecorderError
 
 DETECT_KINDS = ("people", "faces", "hands", "animals", "objects", "text", "codes")
 FACES = ("idle", "listening", "thinking", "speaking", "happy", "sad", "warn", "asleep")
@@ -23,7 +26,7 @@ MODELS = ("lfm3-1.7b", "lfm3-vl-2b")
 LLM_TIMEOUT_S = 180.0  # includes loading the model (a few seconds) on first use
 
 
-def build_mcp(hub: PhoneHub) -> MCPServer:
+def build_mcp(hub: PhoneHub, recorder: Recorder | None = None) -> MCPServer:
     mcp = MCPServer(
         "tonypi-phone",
         instructions=(
@@ -33,7 +36,12 @@ def build_mcp(hub: PhoneHub) -> MCPServer:
             "ground/edge checking, its own motion sensor, sound events, an on-device LFM3 language and vision model, "
             "its speaker and its screen, which shows Tony's face. Image coordinates are x, y from 0 to 1 in the "
             "snapshot image, origin top-left. Angles are degrees, positive = left (bearing) or up (elevation). "
-            "World positions are metres in phone_pose's frame. Body movement is in the separate tonypi MCP server."
+            "World positions are metres in phone_pose's frame. Body movement is in the separate tonypi MCP server. "
+            "The phone has two modes (phone_mode): mounted (on Tony, as above) and companion (on a stand or in a "
+            "hand, watching Tony from outside: phone_track follows him, phone_record / phone_record_jobs record "
+            "what he does next to tonyd's joint and tilt data, phone_episode_review shows a recording as one image, "
+            "so you can watch your own body move, check clearance before a new move, and measure a walk from "
+            "outside). In companion mode phone_pose and phone_motion are the phone's, not Tony's."
         ),
     )
 
@@ -150,7 +158,7 @@ def build_mcp(hub: PhoneHub) -> MCPServer:
 
     @mcp.tool()
     async def phone_pose() -> dict:
-        """Where the phone (so Tony's body) is, from ARKit visual-inertial tracking: x, y, z in metres from where
+        """Where the phone (so Tony's body, when mounted) is, from ARKit visual-inertial tracking: x, y, z in metres from where
         tracking started (y is up), yaw_deg (heading, positive = turned left since the start), pitch_deg. Trust it
         only when tracking is "normal". Better than counting steps for how far Tony walked or turned. Streamed at
         10 Hz, so this is instant."""
@@ -253,6 +261,106 @@ def build_mcp(hub: PhoneHub) -> MCPServer:
             raise ToolError(f"unknown face {face!r}; one of {', '.join(FACES)}")
         await ask("face", face=face, seconds=max(0.5, min(60.0, float(seconds))))
         return {"face": face}
+
+    # ---- companion mode: watching Tony from outside ---------------------------------------------------------
+
+    def rec() -> Recorder:
+        if recorder is None:
+            raise ToolError("recording is not available in this bridge")
+        return recorder
+
+    @mcp.tool()
+    async def phone_mode(mode: str | None = None) -> dict:
+        """The phone's mode: "mounted" (on Tony: his senses and face) or "companion" (on a stand or in a hand,
+        watching Tony from outside: the screen shows the camera instead of a face). Pass mode to switch; the person
+        moving the phone should say which. Returns the phone's status."""
+        if mode is not None and mode not in ("mounted", "companion"):
+            raise ToolError("mode is mounted or companion")
+        header, _ = await ask("mode", timeout=5, **({"mode": mode} if mode else {}))
+        return fields(header)
+
+    @mcp.tool()
+    async def phone_track(target: str = "the small humanoid robot", box: list[float] | None = None,
+                          stop: bool = False) -> dict:
+        """Follow something in the phone camera at 10 Hz (Vision object tracker): in companion mode, usually Tony.
+        Finds `target` with LFM3-VL first (a few seconds), or starts from `box` [x, y, w, h] (0-1, top-left origin,
+        e.g. from phone_detect or phone_locate). Re-finds it by itself when lost. Every recorded frame then carries
+        the tracked box, distance and world position. stop=true ends tracking."""
+        args: dict = {"stop": True} if stop else {"target": target}
+        if box and not stop:
+            if len(box) != 4:
+                raise ToolError("box is [x, y, w, h]")
+            args["box"] = [_unit(v) for v in box]
+        header, _ = await ask("track", timeout=LLM_TIMEOUT_S, **args)
+        return fields(header)
+
+    @mcp.tool()
+    async def phone_record(action: str = "start", label: str = "", fps: float = 5, max_s: float = 60,
+                           joints_hz: float = 2) -> dict:
+        """Record an episode: the phone camera at fps (1-10) plus tonyd state and joint positions at joints_hz
+        (0-2; mid-job tonyd answers joints in ~0.5 s, positions can be null), until action="stop" or max_s. Start it, run the move with the tonypi tools, stop it, then
+        phone_episode_review. Stopping returns the summary: frames, the jobs that ran (max_tilt_deg, yaw_deg),
+        and target_moved_m (how far the tracked target moved on the floor, when phone_track was on)."""
+        r = rec()
+        try:
+            if action == "stop":
+                return await r.stop()
+            if action != "start":
+                raise ToolError("action is start or stop")
+            return await r.start(label=label, fps=fps, max_s=max_s, joints_hz=joints_hz)
+        except RecorderError as e:
+            raise ToolError(str(e)) from e
+
+    @mcp.tool()
+    async def phone_record_jobs(on: bool = True, fps: float = 5, joints_hz: float = 2) -> dict:
+        """Record every tonyd job automatically (a skill, a pose, your own keyframes): each becomes an episode from
+        1 s before it starts to 1 s after it ends, named after the skill. Keeps the phone streaming while on."""
+        try:
+            return await rec().set_auto(on, fps=fps, joints_hz=joints_hz)
+        except RecorderError as e:
+            raise ToolError(str(e)) from e
+
+    @mcp.tool()
+    async def phone_episodes(limit: int = 10) -> dict:
+        """Recorded episodes, newest first: id, label, seconds, frames, the jobs in it (skill, state, max_tilt_deg,
+        yaw_deg) and target_moved_m."""
+        r = rec()
+        return {"episodes": r.list(max(1, min(100, int(limit)))), "recording": r.current.id if r.current else None,
+                "auto": r.auto is not None, "folder": str(r.root)}
+
+    @mcp.tool()
+    async def phone_episode_review(episode_id: str = "latest", frames: int = 8) -> list:
+        """Watch an episode: `frames` (1-16) pictures spread over it in one image, in time order left to right,
+        top to bottom, each stamped with its time, the tracked target boxed (green, orange = lost). Plus the
+        episode's summary. Use it to judge a move you just ran: direction, clearance, balance, a fall."""
+        try:
+            jpeg, meta = await asyncio.to_thread(rec().contact_sheet, episode_id, max(1, min(16, int(frames))))
+        except RecorderError as e:
+            raise ToolError(str(e)) from e
+        return [Image(data=jpeg, format="jpeg"), meta]
+
+    @mcp.custom_route("/live", methods=["GET"])
+    async def live(request: Request) -> StreamingResponse | JSONResponse:
+        """MJPEG of the phone camera for a person (a browser); the phone streams while someone watches."""
+        if recorder is None or not hub.connected:
+            return JSONResponse({"error": "phone not connected"}, status_code=503)
+
+        async def frames():
+            recorder.viewers += 1
+            try:
+                await recorder.sync_stream()
+                while True:
+                    async with recorder.new_frame:
+                        await asyncio.wait_for(recorder.new_frame.wait(), 10)
+                    _, jpeg, _ = recorder.latest
+                    yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+            except TimeoutError:
+                return
+            finally:
+                recorder.viewers -= 1
+                await recorder.sync_stream()
+
+        return StreamingResponse(frames(), media_type="multipart/x-mixed-replace; boundary=frame")
 
     # ---- OpenAI-compatible endpoint -------------------------------------------------------------------------
 

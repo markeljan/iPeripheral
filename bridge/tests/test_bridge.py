@@ -56,6 +56,8 @@ def tonyd_reply(msg: dict) -> dict:
         return {**base, "stopped": True}
     if msg["op"] == "skills":
         return {**base, "skills": ["wave", "step_in_place", {"name": "get_up"}]}
+    if msg["op"] == "joints":
+        return {**base, "raw": {"6": 570}, "pos": {"6": 570}}
     return {**base, "subscribed": True}
 
 
@@ -67,7 +69,9 @@ async def rig(monkeypatch):
     await tonyd.start()
     await agent.start()
     monkeypatch.setattr("tonypi_phone.links.RECONNECT_S", 0.05)
-    bridge = Bridge(TokenStore(d / "tokens.json"), tonyd_sock=tonyd.path, agent_sock=agent.path)
+    monkeypatch.setattr("tonypi_phone.recorder.TAIL_S", 0.2)
+    bridge = Bridge(TokenStore(d / "tokens.json"), tonyd_sock=tonyd.path, agent_sock=agent.path,
+                    voice_sock=str(d / "voice.sock"), episodes=d / "episodes")
     links = asyncio.create_task(bridge.run_links())
     await asyncio.wait_for(asyncio.gather(bridge.tonyd.connected.wait(), bridge.agent.connected.wait()), 2)
     server = await serve(bridge.handler, "127.0.0.1", 0)
@@ -92,7 +96,7 @@ async def pair(bridge, agent, url) -> str:
         await ws.send(json.dumps({"type": "pair_request", "v": 1, "device": "test phone"}))
         await recv_type(ws, "pair_code_sent")
         said = next(m for m in agent.got if m.get("op") == "say")["text"]
-        code = said.split("is ")[1].split(".")[0].replace(" ", "")
+        code = said.split(": ")[1].split(".")[0].replace(", ", "")
         await ws.send(json.dumps({"type": "pair_confirm", "code": "000000" if code != "000000" else "111111"}))
         wrong = await recv_type(ws, "error")
         assert wrong["tries_left"] == 2
@@ -175,7 +179,8 @@ async def test_snapshot_request_over_binary_frame(rig):
                          "phone_obstacles", "phone_pose", "phone_reset_origin", "phone_detect", "phone_find",
                          "phone_read_text", "phone_ground_check", "phone_motion", "phone_events", "phone_llm",
                          "phone_look_and_ask", "phone_models", "phone_model_download", "phone_gaze",
-                         "phone_face_tracking", "phone_locate"}
+                         "phone_face_tracking", "phone_locate", "phone_mode", "phone_track", "phone_record",
+                         "phone_record_jobs", "phone_episodes", "phone_episode_review"}
 
 
 async def test_newer_phone_replaces_older(rig):
@@ -297,4 +302,108 @@ async def test_openai_chat_completions_runs_on_the_phone(rig):
     body = r.json()
     assert r.status_code == 200 and body["choices"][0]["message"]["content"] == "Hello!"
     assert body["usage"]["total_tokens"] == 15
+    await ws.close()
+
+
+async def test_auto_recorded_job_becomes_an_episode(rig):
+    """Companion mode: a tonyd job starts → the frames streaming from the phone (with 1 s of pre-roll), tonyd's joints
+    and the job's own result land in one episode, which phone_episode_review shows as one image."""
+    import io
+
+    from PIL import Image as PILImage
+
+    bridge, tonyd, _, url = rig
+    mcp = build_mcp(bridge.hub, bridge.recorder)
+    ws = await authed(bridge, url)
+    buf = io.BytesIO()
+    PILImage.new("RGB", (48, 64), "gray").save(buf, "JPEG")
+    jpeg = buf.getvalue()
+    asked: list[float] = []
+
+    async def phone():
+        seq = 0
+        while True:
+            msg = json.loads(await ws.recv())
+            if msg.get("type") == "request" and msg["op"] == "stream":
+                asked.append(msg["fps"])
+                await ws.send(json.dumps({"type": "reply", "rid": msg["rid"], "ok": True, "fps": msg["fps"]}))
+
+    async def frames():
+        for seq in range(1000):
+            x = 0.1 + seq * 0.01  # Tony walks right: 1 cm of world x per frame
+            tracked = {"kind": "tracked", "label": "robot", "x": 0.4, "y": 0.3, "w": 0.2, "h": 0.4, "lost": False,
+                       "world": [x, 0.0, -1.5]}
+            await ws.send(pack_frame({"type": "frame", "seq": seq, "t": seq / 20, "width": 48, "height": 64,
+                                      "tracked": tracked}, jpeg))
+            await asyncio.sleep(0.02)
+
+    answerer = asyncio.create_task(phone())
+    on = tool_json(await mcp.call_tool("phone_record_jobs", {"on": True, "fps": 8}))
+    assert on["auto"] and asked == [8.0]
+    feeder = asyncio.create_task(frames())
+    await asyncio.sleep(0.3)  # pre-roll
+    job = {"id": 7, "skill": "walk_forward", "count": 1, "state": "running"}
+    await tonyd.broadcast({"event": "job", "t": 1.0, **job})  # real tonyd sends the job's fields flat
+    await asyncio.sleep(0.4)
+    assert bridge.recorder.current is not None
+    await tonyd.broadcast({"event": "job", "t": 2.0, **job, "state": "done", "max_tilt_deg": 6.1, "yaw_deg": 2.0})
+    await asyncio.sleep(0.5)  # tail, then the episode closes
+    assert bridge.recorder.current is None
+    feeder.cancel()
+
+    eps = tool_json(await mcp.call_tool("phone_episodes", {}))["episodes"]
+    assert len(eps) == 1 and eps[0]["label"] == "walk_forward" and eps[0]["source"] == "job"
+    assert eps[0]["jobs"] == [{"skill": "walk_forward", "state": "done", "max_tilt_deg": 6.1, "yaw_deg": 2.0}]
+    assert eps[0]["frames"] >= 20 and eps[0]["target_moved_m"] > 0.15
+    folder = Path(tool_json(await mcp.call_tool("phone_episodes", {}))["folder"]) / eps[0]["id"]
+    assert '"6":570' in (folder / "body.jsonl").read_text()
+
+    review = await mcp.call_tool("phone_episode_review", {"frames": 4})
+    kinds = [c.type for c in review.content]
+    assert kinds[0] == "image" and "text" in kinds
+    sheet = PILImage.open(io.BytesIO(__import__("base64").b64decode(review.content[0].data)))
+    assert sheet.size[0] == 4 * 320
+
+    off = tool_json(await mcp.call_tool("phone_record_jobs", {"on": False}))
+    assert not off["auto"] and asked[-1] == 0
+    answerer.cancel()
+    await ws.close()
+
+
+async def test_commands_and_speech_go_to_the_voice_service_when_it_runs(rig):
+    """With tonypi-voice up (live mode and the harnesses), a companion phone's commands go to its `text` op and the
+    pairing code is spoken by it; a mounted phone's don't (voice heard them too); when voice refuses (not in live
+    mode), the agent gets them."""
+    bridge, _, agent, url = rig
+    live = {"on": True}
+
+    def voice_reply(m):
+        if m["op"] == "text" and not live["on"]:
+            return {"rid": m["rid"], "ok": False, "error": "typed requests need live mode with the brain running"}
+        return {"rid": m["rid"], "ok": True}
+
+    voice = FakeSocket(bridge.voice.path, voice_reply)
+    await voice.start()
+    await asyncio.wait_for(bridge.voice.connected.wait(), 2)
+    ws = await authed(bridge, url)
+    await ws.send(json.dumps({"type": "status", "mode": "mounted"}))
+    await ws.send(json.dumps({"type": "command", "text": "sit"}))
+    await asyncio.sleep(0.1)
+    assert not any(m.get("op") == "text" for m in voice.got) and {"text": "sit"} not in agent.got
+
+    await ws.send(json.dumps({"type": "status", "mode": "companion"}))
+    await ws.send(json.dumps({"type": "command", "text": "wave"}))
+    await asyncio.sleep(0.1)
+    assert any(m.get("op") == "text" and m.get("text") == "wave" and m.get("source") == "phone_mic"
+               for m in voice.got)
+    assert not any(m.get("op") == "attach" for m in voice.got)  # never take the brain's place
+    assert {"text": "wave"} not in agent.got
+
+    live["on"] = False
+    await ws.send(json.dumps({"type": "command", "text": "bow"}))
+    await asyncio.sleep(0.1)
+    assert {"text": "bow"} in agent.got
+
+    await bridge.speak("hello")
+    assert any(m.get("op") == "say" and m.get("text") == "hello" for m in voice.got)
     await ws.close()

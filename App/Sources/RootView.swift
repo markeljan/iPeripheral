@@ -1,15 +1,22 @@
 import SwiftUI
 import TonyLink
 
-/// Full-screen face. Tap = stop the body. Long-press = debug overlay. Pairing sheet when the bridge asks for a code.
+/// Full-screen face (mounted) or camera view (companion). Tap = stop the body. Long-press = debug overlay. Pairing
+/// sheet when the bridge asks for a code.
 struct RootView: View {
     @Environment(PeripheralLink.self) private var link
     @State private var debug = false
 
     var body: some View {
         ZStack {
-            FaceView(face: link.face, gaze: link.gaze)
-                .ignoresSafeArea()
+            Group {
+                if link.mode == .companion {
+                    CompanionView()
+                } else {
+                    FaceView(face: link.face, gaze: link.gaze)
+                }
+            }
+            .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture { link.stop() }
                 .onLongPressGesture(minimumDuration: 1) { debug.toggle() }
@@ -23,6 +30,61 @@ struct RootView: View {
     private var needsCode: Bool {
         if case .needsCode = link.phase { return true }
         return false
+    }
+}
+
+/// Companion mode: what the camera sees, the tracked target's box, and whether the bridge is recording.
+struct CompanionView: View {
+    @Environment(PeripheralLink.self) private var link
+
+    var body: some View {
+        ZStack {
+            Color.black
+            if let image = link.preview {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .overlay {
+                        GeometryReader { g in
+                            if let t = link.tracked {
+                                let lost = t.confidence < PeripheralLink.trackLost
+                                Rectangle()
+                                    .stroke(lost ? .orange : .green, lineWidth: 3)
+                                    .frame(width: t.w * g.size.width, height: t.h * g.size.height)
+                                    .position(x: (t.x + t.w / 2) * g.size.width, y: (t.y + t.h / 2) * g.size.height)
+                            }
+                        }
+                    }
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    badge("COMPANION", .blue)
+                    if link.streaming { badge("● LIVE", .red) }
+                    Spacer()
+                    if case .connected = link.phase {} else { badge("offline", .gray) }
+                }
+                if let t = link.tracked {
+                    Text(trackText(t)).font(.system(.callout, design: .monospaced)).foregroundStyle(.white)
+                        .padding(6).background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                }
+                Spacer()
+                Text("Tap to stop Tony · hold for settings").font(.caption).foregroundStyle(.white.opacity(0.7))
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 56)
+        }
+    }
+
+    private func trackText(_ t: Senses.Detection) -> String {
+        let lost = t.confidence < PeripheralLink.trackLost
+        let dist = t.metres.map { String(format: " %.2f m", $0) } ?? ""
+        return "\(t.label ?? "target")\(lost ? " (lost)" : "")\(dist)"
+    }
+
+    private func badge(_ s: String, _ c: Color) -> some View {
+        Text(s).font(.caption.bold()).foregroundStyle(.white).padding(.horizontal, 8).padding(.vertical, 4)
+            .background(c, in: Capsule())
     }
 }
 
@@ -66,6 +128,14 @@ struct DebugOverlay: View {
                 Button("Close", action: close)
             }
             row("link", phaseText)
+            Picker(
+                "Mode",
+                selection: Binding(get: { link.mode }, set: { link.setMode($0) })
+            ) {
+                Text("Mounted on Tony").tag(PeripheralLink.Mode.mounted)
+                Text("Companion").tag(PeripheralLink.Mode.companion)
+            }
+            .pickerStyle(.segmented)
             if let r = link.robot {
                 row(
                     "robot", r.busy ? "running \(r.skill ?? "?")" : (r.asleep ? "asleep" : (r.lying ? "lying" : "idle"))

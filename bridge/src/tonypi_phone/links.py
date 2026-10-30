@@ -1,7 +1,8 @@
-"""Clients for the robot's two Unix sockets (JSON lines): tonyd (body, camera) and tonypi-agent (commands, speech).
+"""Clients for the robot's Unix sockets (JSON lines): tonyd (body, camera), tonypi-voice (speech and the live brain)
+and tonypi-agent (the older voice front end; commands, speech). Voice and agent never run together.
 
-Both protocols belong to the tonypi repo (tonyd/server.py, agent/daemon.py); this file is the only place that knows
-them, so a change there is a change here. Both links stay connected and reconnect every 2 s on their own.
+The protocols belong to the tonypi repo (tonyd/server.py, voice/service.py, agent/daemon.py); this file is the only
+place that knows them, so a change there is a change here. All links stay connected and reconnect every 2 s.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ log = logging.getLogger(__name__)
 
 TONYD_SOCK = os.environ.get("TONYD_SOCK", "/run/tonypi/tonyd.sock")
 AGENT_SOCK = os.environ.get("TONYPI_SOCK", "/run/tonypi/agent.sock")
+VOICE_SOCK = os.environ.get("TONYPI_VOICE_SOCK", "/run/tonypi/voice.sock")
 RECONNECT_S = 2.0
 
 
@@ -78,17 +80,15 @@ class JsonlLink:
         await self._writer.drain()
 
 
-class TonydLink(JsonlLink):
-    """tonyd: request/reply by `rid`, plus the `job`/`warn` event stream (subscribed on every connect)."""
+class RpcLink(JsonlLink):
+    """Request/reply by `rid` ({"op", "rid", ...} -> {"rid", "ok", ...}); lines with "event" go to `on_event`."""
 
-    def __init__(self, on_event: Callable[[dict], None], path: str = TONYD_SOCK) -> None:
-        super().__init__(path, self._on_message, self._subscribe, "tonyd")
-        self.on_event = on_event
+    def __init__(self, path: str, name: str, on_event: Callable[[dict], None] | None = None,
+                 on_connect: Callable[[], Awaitable[None]] | None = None) -> None:
+        super().__init__(path, self._on_message, on_connect, name)
+        self.on_event = on_event or (lambda e: None)
         self._rids = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
-
-    async def _subscribe(self) -> None:
-        await self.send({"op": "subscribe", "rid": 0})
 
     def _on_message(self, msg: dict) -> None:
         if "event" in msg:
@@ -101,7 +101,7 @@ class TonydLink(JsonlLink):
     def on_disconnect(self) -> None:
         for fut in self._pending.values():
             if not fut.done():
-                fut.set_exception(TonydError("connection to tonyd lost"))
+                fut.set_exception(TonydError(f"connection to {self.name} lost"))
         self._pending.clear()
 
     async def call(self, op: str, timeout: float = 10.0, **kw) -> dict:
@@ -114,12 +114,30 @@ class TonydLink(JsonlLink):
         except LinkDown as e:
             raise TonydError(str(e)) from e
         except TimeoutError as e:
-            raise TonydError(f"tonyd did not answer {op} within {timeout} s") from e
+            raise TonydError(f"{self.name} did not answer {op} within {timeout} s") from e
         finally:
             self._pending.pop(rid, None)
         if not msg.get("ok"):
             raise TonydError(msg.get("error", "error"))
         return {k: v for k, v in msg.items() if k not in ("ok", "rid")}
+
+
+class TonydLink(RpcLink):
+    """tonyd: request/reply, plus the `job`/`warn` event stream (subscribed on every connect)."""
+
+    def __init__(self, on_event: Callable[[dict], None], path: str = TONYD_SOCK) -> None:
+        super().__init__(path, "tonyd", on_event, self._subscribe)
+
+    async def _subscribe(self) -> None:
+        await self.send({"op": "subscribe", "rid": 0})
+
+
+class VoiceLink(RpcLink):
+    """tonypi-voice: `say` speaks (GPT-Live or Piper), `text` hands a request to the live brain. Never `attach`:
+    that would make the bridge the brain and detach the real one."""
+
+    def __init__(self, path: str = VOICE_SOCK) -> None:
+        super().__init__(path, "voice")
 
 
 class AgentLink(JsonlLink):

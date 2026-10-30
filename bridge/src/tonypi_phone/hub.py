@@ -9,6 +9,7 @@ import json
 import logging
 import struct
 import time
+from collections.abc import Callable
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class PhoneHub:
         self.status: dict = {}
         self.pose: dict | None = None  # latest streamed pose, with "t" = time.monotonic() when it arrived
         self.events: collections.deque[dict] = collections.deque(maxlen=100)  # falls, impacts, sounds; newest last
+        self.on_frame: Callable[[dict, bytes], None] = lambda header, jpeg: None  # streamed camera frames
         self._rids = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
 

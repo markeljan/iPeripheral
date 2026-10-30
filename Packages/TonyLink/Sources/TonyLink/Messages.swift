@@ -121,18 +121,21 @@ public struct PhoneStatus: Sendable, Equatable {
     public var charging: Bool
     public var thermal: String
     public var caps: [String]
+    /// "mounted" (on Tony: his senses and face) or "companion" (on a stand, watching Tony from outside).
+    public var mode: String
 
-    public init(battery: Double?, charging: Bool, thermal: String, caps: [String]) {
+    public init(battery: Double?, charging: Bool, thermal: String, caps: [String], mode: String = "mounted") {
         self.battery = battery
         self.charging = charging
         self.thermal = thermal
         self.caps = caps
+        self.mode = mode
     }
 
     public var object: [String: JSONValue] {
         [
             "battery": battery.map { .number($0) } ?? .null, "charging": .bool(charging),
-            "thermal": .string(thermal), "caps": .array(caps.map { .string($0) }),
+            "thermal": .string(thermal), "caps": .array(caps.map { .string($0) }), "mode": .string(mode),
         ]
     }
 }

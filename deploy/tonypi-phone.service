@@ -1,6 +1,6 @@
 [Unit]
 Description=TonyPi phone bridge (WebSocket :8766 for Tony's iPhone, MCP on 127.0.0.1:8767/mcp)
-After=network-online.target tonypi-tonyd.service tonypi-agent.service
+After=network-online.target tonypi-tonyd.service tonypi-agent.service tonypi-voice.service
 Wants=network-online.target
 StartLimitIntervalSec=300
 StartLimitBurst=5
@@ -10,6 +10,8 @@ User=pi
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/pi/iPeripheral/bridge/.venv/bin/tonypi-phone
 Restart=on-failure
+# earlyoom kills this before tonyd (-900), the agent and MCP (-500): the phone is extra, the body isn't
+OOMScoreAdjust=300
 RestartSec=5
 
 [Install]

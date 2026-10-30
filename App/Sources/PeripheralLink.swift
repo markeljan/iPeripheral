@@ -10,6 +10,12 @@ private let log = Logger(subsystem: "org.example.iperipheral", category: "link")
 /// The app's whole job: stay connected to the bridge, answer its requests with the phone's senses, show a face.
 @MainActor @Observable
 final class PeripheralLink {
+    /// Mounted: on Tony, his senses and face. Companion: on a stand (or in a hand), watching Tony from outside, so a
+    /// brain can see its own body move: track him, stream and record what he does, hear commands from across the room.
+    enum Mode: String, CaseIterable, Sendable {
+        case mounted, companion
+    }
+
     enum Phase: Equatable {
         case searching
         case connecting(String)
@@ -34,6 +40,16 @@ final class PeripheralLink {
     /// Where the eyes look: the person in front of the screen (front camera), smoothed. Nil = wander.
     private(set) var gaze: CGPoint?
     private(set) var llmState = "idle"
+    /// Launch with `-mode companion`, or switch in the debug overlay or with the bridge's `mode` request.
+    private(set) var mode = Mode(rawValue: UserDefaults.standard.string(forKey: "mode") ?? "") ?? .mounted
+    /// What the tracker follows (companion mode: usually Tony), updated at 10 Hz; and whether frames are streaming.
+    private(set) var tracked: Senses.Detection?
+    private(set) var streaming = false
+    /// The companion screen's camera view, a few frames a second.
+    private(set) var preview: UIImage?
+    private var trackTarget: String?
+    private var trackLoopRunning = false
+    private var streamTask: Task<Void, Never>?
     private var faceOverride: (face: Face, until: Date)?
     private var agentFace: Face = .idle
 
@@ -77,6 +93,7 @@ final class PeripheralLink {
         motion.start()
         Task { await gazeLoop() }
         Task { await thermalLoop() }
+        Task { await previewLoop() }
         Task {  // compile llama.cpp's Metal shaders while nobody is waiting (only if the text model is on the phone)
             try? await Task.sleep(for: .seconds(20))
             if ProcessInfo.processInfo.thermalState.rawValue <= ProcessInfo.ThermalState.fair.rawValue,
@@ -103,6 +120,8 @@ final class PeripheralLink {
         let t = ProcessInfo.processInfo.thermalState
         if let forced = faceTrackingOverride {
             senses.setFaceTracking(forced)
+        } else if mode == .companion {
+            senses.setFaceTracking(false)  // no face on the screen to aim
         } else if t == .serious || t == .critical {
             senses.setFaceTracking(false)
         } else if t == .nominal || t == .fair {
@@ -127,6 +146,7 @@ final class PeripheralLink {
     }
 
     private func motionEvent(_ e: Motion.Event) {
+        guard mode == .mounted else { return }  // the phone's own falls say nothing about Tony's when it isn't on him
         if e.kind == "fall" || e.kind == "impact" { faceOverride = (.sad, Date().addingTimeInterval(3)) }
         let t = motion.tilt
         send(.event(kind: e.kind, fields: ["value": .number(e.value), "tilt_deg": .number(t.deg.rounded())]))
@@ -295,6 +315,7 @@ final class PeripheralLink {
                 try await c.send(
                     .reply(rid: rid, ok: true, fields: ["objects": .array(objects), "age_s": .number(ms(r.age))]))
             case "ground":
+                guard mode == .mounted else { throw LinkError("companion mode: the phone isn't on Tony") }
                 let g = try await off { try $0.ground() }
                 let lanes: [JSONValue] = g.lanes.map { l in
                     [
@@ -353,11 +374,27 @@ final class PeripheralLink {
                 }
                 faceOverride = (f, Date().addingTimeInterval(args["seconds"]?.double ?? 5))
                 try await c.send(.reply(rid: rid, ok: true))
+            case "mode":
+                if let m = args["mode"]?.string {
+                    guard let new = Mode(rawValue: m) else { throw LinkError("mode is mounted or companion") }
+                    setMode(new)
+                }
+                try await c.send(.reply(rid: rid, ok: true, fields: status().object))
+            case "track":
+                try await c.send(.reply(rid: rid, ok: true, fields: try await track(args)))
+            case "stream":
+                let fps = min(10, max(0, args["fps"]?.double ?? 5))
+                streamTask?.cancel()
+                streamTask = nil
+                streaming = fps > 0
+                if fps > 0 {
+                    let side = min(1280, max(240, args["max_side"]?.int ?? 640))
+                    let quality = min(0.9, max(0.3, args["quality"]?.double ?? 0.6))
+                    streamTask = Task { await streamLoop(c, fps: fps, maxSide: side, quality: quality) }
+                }
+                try await c.send(.reply(rid: rid, ok: true, fields: ["fps": .number(fps)]))
             case "status":
-                try await c.send(
-                    .reply(
-                        rid: rid, ok: true,
-                        fields: Self.phoneStatus(cameraOn: senses.running, listening: earsState == "listening").object))
+                try await c.send(.reply(rid: rid, ok: true, fields: status().object))
             default:
                 throw LinkError("unknown op \(op)")
             }
@@ -379,6 +416,127 @@ final class PeripheralLink {
             "mode": .string(faceTrackingOverride.map { $0 ? "on" : "off" } ?? "auto"),
             "viewer": point(senses.viewerGaze()), "eyes": point(gaze),
         ]
+    }
+
+    // ---- companion mode: mode, tracking, streaming ------------------------------------------------------------
+
+    func setMode(_ m: Mode) {
+        guard m != mode else { return }
+        mode = m
+        UserDefaults.standard.set(m.rawValue, forKey: "mode")
+        log.info("mode: \(m.rawValue, privacy: .public)")
+        applyThermal()
+        send(.status(status()))
+    }
+
+    /// Start following something: `box` [x, y, w, h] seeds the tracker directly; otherwise LFM3-VL finds `target`
+    /// first (a few seconds). `stop: true` ends it. The tracker re-finds a lost target with the vision model.
+    private func track(_ args: [String: JSONValue]) async throws -> [String: JSONValue] {
+        if args["stop"]?.bool == true {
+            senses.stopTracking()
+            trackTarget = nil
+            tracked = nil
+            return ["tracking": false]
+        }
+        let target = args["target"]?.string ?? "the small humanoid robot"
+        if let b = args["box"]?.array?.compactMap(\.double), b.count == 4 {
+            senses.startTracking(label: target, x: b[0], y: b[1], w: b[2], h: b[3])
+            trackTarget = args["refind"]?.bool == false ? nil : target
+        } else {
+            guard let d = try await find(target) else { throw LinkError("couldn't see \(target)") }
+            senses.startTracking(label: target, x: d.x, y: d.y, w: d.w, h: d.h)
+            trackTarget = target
+        }
+        if !trackLoopRunning { Task { await trackLoop() } }
+        tracked = nil
+        for _ in 0..<20 where tracked == nil {  // wait for the first tracker step, so the reply has a fresh box
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return ["tracking": true, "tracked": tracked.map(Self.trackedJSON) ?? .null]
+    }
+
+    /// The biggest box LFM3-VL draws for `target`.
+    private func find(_ target: String) async throws -> Senses.Detection? {
+        try await locateBoxes(target, side: 768, thinking: false).placed.max { $0.w * $0.h < $1.w * $1.h }
+    }
+
+    /// 10 Hz tracker steps. Lost for 2 s (confidence < 0.3): ask the vision model again, at most every 10 s.
+    private func trackLoop() async {
+        trackLoopRunning = true
+        defer { trackLoopRunning = false }
+        var lastGood = Date()
+        var lastRefind = Date.distantPast
+        while senses.tracking, !Task.isCancelled {
+            if let d = try? await off({ try $0.trackStep() }) {
+                tracked = d
+                if d.confidence >= Self.trackLost { lastGood = Date() }
+            }
+            if let target = trackTarget, Date().timeIntervalSince(lastGood) > 2,
+                Date().timeIntervalSince(lastRefind) > 10, llmState == "idle"
+            {
+                lastRefind = Date()
+                if let d = try? await find(target), senses.tracking {
+                    senses.startTracking(label: target, x: d.x, y: d.y, w: d.w, h: d.h)
+                    lastGood = Date()
+                }
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        tracked = nil
+    }
+
+    static let trackLost = 0.3
+
+    private static func trackedJSON(_ d: Senses.Detection) -> JSONValue {
+        guard case .object(var o) = json(d) else { return .null }
+        o["lost"] = .bool(d.confidence < trackLost)
+        return .object(o)
+    }
+
+    /// Pushes JPEG frames (binary `frame` messages: what was tracked and where the phone was, with each picture)
+    /// until the bridge says `stream` fps 0 or the connection ends. The bridge records them as episodes.
+    private func streamLoop(_ c: LinkConnection, fps: Double, maxSide: Int, quality: Double) async {
+        var seq = 0
+        let period = 1 / fps
+        while !Task.isCancelled, conn === c {
+            let start = Date()
+            if let shot = try? await off({ try $0.snapshot(maxSide: maxSide, quality: quality) }) {
+                var header: [String: JSONValue] = [
+                    "type": "frame", "seq": .number(Double(seq)),
+                    "t": .number(ms(Date().timeIntervalSince1970 - shot.age)),
+                    "width": .number(Double(shot.width)), "height": .number(Double(shot.height)),
+                    "tracked": tracked.map(Self.trackedJSON) ?? .null,
+                ]
+                if let p = try? senses.pose() {
+                    header["pose"] = [
+                        "x": .number(cm(p.x)), "y": .number(cm(p.y)), "z": .number(cm(p.z)),
+                        "yaw_deg": .number((p.yawDeg * 10).rounded() / 10), "tracking": .string(p.tracking),
+                    ]
+                }
+                do {
+                    try await c.send(BinaryFrame(header: header, payload: shot.jpeg))
+                } catch {
+                    break
+                }
+                seq += 1
+            }
+            try? await Task.sleep(for: .seconds(max(0.01, period - Date().timeIntervalSince(start))))
+        }
+        if !Task.isCancelled { streaming = false }
+    }
+
+    /// The companion screen shows what the camera sees (4 fps); nothing to draw in mounted mode, where it's a face.
+    private func previewLoop() async {
+        while !Task.isCancelled {
+            if mode == .companion, senses.running, UIApplication.shared.applicationState == .active,
+                let shot = try? await off({ try $0.snapshot(maxSide: 480, quality: 0.5) })
+            {
+                preview = UIImage(data: shot.jpeg)
+            } else if mode == .mounted {
+                preview = nil
+            }
+            try? await Task.sleep(for: .milliseconds(mode == .companion ? 250 : 1000))
+        }
     }
 
     // ---- on-device model -------------------------------------------------------------------------------------
@@ -436,9 +594,19 @@ final class PeripheralLink {
     /// for finding something once, not for tracking it.
     private func locate(_ args: [String: JSONValue]) async throws -> [String: JSONValue] {
         guard let target = args["target"]?.string, !target.isEmpty else { throw LinkError("target is required") }
+        let side = min(1024, max(256, args["image_side"]?.int ?? 768))  // grounding likes detail
+        let (placed, out) = try await locateBoxes(target, side: side, thinking: args["thinking"]?.bool ?? false)
+        return [
+            "target": .string(target), "objects": .array(placed.map(Self.json)), "raw": .string(out.text),
+            "prompt_tokens": .number(Double(out.promptTokens)), "total_s": .number(ms(out.totalSeconds)),
+        ]
+    }
+
+    private func locateBoxes(_ target: String, side: Int, thinking: Bool) async throws -> (
+        placed: [Senses.Detection], out: LocalModel.Output
+    ) {
         guard let spec = ModelSpec.named("lfm3-vl-2b") else { throw LinkError("no vision model") }
         guard ProcessInfo.processInfo.thermalState != .critical else { throw LocalModel.Failure.tooHot }
-        let side = min(1024, max(256, args["image_side"]?.int ?? 768))  // grounding likes detail
         let frame = try await off { try $0.capture(maxSide: side) }
         // The box format is LFM3-VL's own (Liquid's grounding docs): [xmin, ymin, xmax, ymax] on a 0-1000 grid.
         let system = """
@@ -448,18 +616,14 @@ final class PeripheralLink {
             """
         var options = LocalModel.Options()
         options.maxTokens = 400
-        options.thinking = args["thinking"]?.bool ?? false
+        options.thinking = thinking
         llmState = "locating"
         defer { llmState = "idle" }
         let out = try await model.generate(
             model: spec, messages: [("system", system), ("user", "Provide bounding boxes for \(target).")],
             image: (frame.rgb, frame.width, frame.height), options: options)
         let boxes = Grounding.parse(out.text).map { ($0.label, $0.x, $0.y, $0.w, $0.h) }
-        let placed = senses.place(boxes, in: frame)
-        return [
-            "target": .string(target), "objects": .array(placed.map(Self.json)), "raw": .string(out.text),
-            "prompt_tokens": .number(Double(out.promptTokens)), "total_s": .number(ms(out.totalSeconds)),
-        ]
+        return (senses.place(boxes, in: frame), out)
     }
 
     private static func json(_ d: Senses.Detection) -> JSONValue {
@@ -519,7 +683,7 @@ final class PeripheralLink {
 
     private func statusLoop(_ c: LinkConnection) async {
         while !Task.isCancelled {
-            try? await c.send(.status(Self.phoneStatus(cameraOn: senses.running, listening: earsState == "listening")))
+            try? await c.send(.status(status()))
             try? await Task.sleep(for: .seconds(5))
             if Task.isCancelled { return }
             guard await c.ping(timeout: 5) else {
@@ -530,7 +694,11 @@ final class PeripheralLink {
         }
     }
 
-    static func phoneStatus(cameraOn: Bool, listening: Bool = false) -> PhoneStatus {
+    private func status() -> PhoneStatus {
+        Self.phoneStatus(cameraOn: senses.running, listening: earsState == "listening", mode: mode)
+    }
+
+    static func phoneStatus(cameraOn: Bool, listening: Bool = false, mode: Mode = .mounted) -> PhoneStatus {
         let d = UIDevice.current
         let thermal =
             switch ProcessInfo.processInfo.thermalState {
@@ -544,9 +712,11 @@ final class PeripheralLink {
             battery: d.batteryLevel >= 0 ? Double(d.batteryLevel) : nil,
             charging: d.batteryState == .charging || d.batteryState == .full,
             thermal: thermal,
-            caps: (cameraOn ? ["camera", "pose", "detect"] + (Senses.hasLiDAR ? ["depth", "ground"] : []) : [])
+            caps: (cameraOn ? ["camera", "pose", "detect", "track", "stream"] : [])
+                + (cameraOn && Senses.hasLiDAR ? (mode == .mounted ? ["depth", "ground"] : ["depth"]) : [])
                 + (Senses.hasObjectModel ? ["objects"] : []) + (listening ? ["voice", "sounds"] : [])
-                + (LocalModel.available ? ["llm"] : []) + ["motion", "say", "face"])
+                + (LocalModel.available ? ["llm"] : []) + (mode == .mounted ? ["motion", "say", "face"] : ["say"]),
+            mode: mode.rawValue)
     }
 
     // ---- voice ------------------------------------------------------------------------------------------------

@@ -522,6 +522,41 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
         return out
     }
 
+    // ---- tracking (companion mode: follow Tony from frame to frame) -------------------------------------------
+
+    /// Vision's object tracker, seeded with one box (from the vision model or the caller) and stepped once per
+    /// frame. Milliseconds per step, so it can run at 10 Hz where the vision model takes seconds.
+    private var tracker: (request: VNTrackObjectRequest, handler: VNSequenceRequestHandler, label: String)?
+
+    var tracking: Bool { lock.withLock { tracker != nil } }
+
+    func startTracking(label: String, x: Double, y: Double, w: Double, h: Double) {
+        let box = CGRect(x: x, y: 1 - y - h, width: w, height: h)  // Vision: bottom-left origin
+        let r = VNTrackObjectRequest(detectedObjectObservation: VNDetectedObjectObservation(boundingBox: box))
+        r.trackingLevel = .accurate
+        lock.withLock { tracker = (r, VNSequenceRequestHandler(), label) }
+    }
+
+    func stopTracking() { lock.withLock { tracker = nil } }
+
+    /// One tracker step on the latest frame: where the target is now, placed in the world like `detect`'s boxes.
+    /// Confidence falls toward 0 when the tracker loses it. Call from one task only.
+    func trackStep() throws -> Detection? {
+        guard let t = lock.withLock({ tracker }) else { return nil }
+        let l = try current()
+        try t.handler.perform([t.request], on: l.image, orientation: .right)
+        guard let obs = t.request.results?.first as? VNDetectedObjectObservation else { return nil }
+        t.request.inputObservation = obs
+        let b = obs.boundingBox
+        var out = [
+            Detection(
+                kind: "tracked", label: t.label, x: b.minX, y: 1 - b.maxY, w: b.width, h: b.height,
+                confidence: Double(obs.confidence))
+        ]
+        Self.place(&out, in: l)
+        return out[0]
+    }
+
     private static func label(_ obs: VNObservation) -> String? {
         if let o = obs as? VNRecognizedObjectObservation { return o.labels.first?.identifier.lowercased() }
         if let t = obs as? VNRecognizedTextObservation { return t.topCandidates(1).first?.string }

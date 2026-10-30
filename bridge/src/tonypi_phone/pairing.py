@@ -64,5 +64,5 @@ class PairingAttempt:
 
     @property
     def spoken(self) -> str:
-        digits = " ".join(self.code)
-        return f"My pairing code is {digits}. Again, {digits}."
+        digits = ", ".join(self.code)  # one by one: GPT-Live reads a bare 6-digit number as "471 thousand ..."
+        return f"Pairing code: {digits}. Again: {digits}."

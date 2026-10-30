@@ -16,7 +16,7 @@ from tonypi_phone.pairing import TokenStore
 
 async def amain(args: argparse.Namespace) -> None:
     bridge = Bridge(TokenStore())
-    mcp = build_mcp(bridge.hub)
+    mcp = build_mcp(bridge.hub, bridge.recorder)
     async with serve(bridge.handler, args.host, args.port, max_size=16 << 20, ping_interval=10, ping_timeout=10):
         logging.info("phone WebSocket on ws://%s:%d/, MCP on http://127.0.0.1:%d/mcp", args.host, args.port, args.mcp_port)
         await asyncio.gather(bridge.run_links(), mcp.run_streamable_http_async(host="127.0.0.1", port=args.mcp_port))

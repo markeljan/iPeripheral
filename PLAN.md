@@ -101,8 +101,10 @@ depth < 40 cm, correcting heading from ARKit, not step counts. *Done when:* Tony
 
 **Live check 2026-10-29 (phone upright on the desk):** YOLO11n found the monitor, OCR read the screen, bearings right
 (left +, right −), ground check found the desk 15 cm below and the wall at 0.75 m, LFM3-VL-2B described the scene in
-3.7 s, LFM3-1.7B ~28–30 tok/s on Metal (CPU 2.4 tok/s), sound and motion events reach the bridge. Gaze untested: the
-phone stays thermally "serious" (charging + ARKit + speech), so face tracking is off by design.
+3.7 s, LFM3-1.7B ~28–30 tok/s on Metal (CPU 2.4 tok/s), sound and motion events reach the bridge. Gaze (front-camera face tracking, forced on with
+`phone_face_tracking on` while the phone was thermally "serious"): tracked 100% of frames facing the screen, eyes
+follow left (−0.58) and right (+0.48 / +0.42), depth keeps working alongside; off-axis faces sometimes drop to "not
+tracked", so the eyes hold the last position up to 6 s.
 
 **P5 — Phone as compute. [LFM3-1.7B and LFM3-VL-2B (official QAD Q4_0 GGUFs) run on the phone via llama.cpp b11988 on
 Metal; MCP `phone_llm`, `phone_look_and_ask`, and an OpenAI-compatible `/v1/chat/completions` on the bridge; benchmark

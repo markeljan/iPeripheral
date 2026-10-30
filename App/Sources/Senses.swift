@@ -103,7 +103,14 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
             resolution: frame.camera.imageResolution, tracking: tracking, at: Date())
         // The face of whoever looks at the screen (front camera), as a gaze direction in screen space.
         var gaze: CGPoint?
-        if let face = frame.anchors.compactMap({ $0 as? ARFaceAnchor }).first(where: \.isTracked) {
+        let faces = frame.anchors.compactMap { $0 as? ARFaceAnchor }
+        lock.withLock {
+            faceAnchored = !faces.isEmpty
+            stats.frames += 1
+            if !faces.isEmpty { stats.anchors += 1 }
+            if faces.contains(where: \.isTracked) { stats.tracked += 1 }
+        }
+        if let face = faces.first(where: \.isTracked) {
             let p = frame.camera.transform.inverse * face.transform.columns.3
             // Camera space is landscape: camera +y = screen right, camera +x = screen down; the viewer is at +z.
             if p.z > 0.05 { gaze = CGPoint(x: Double(p.y / p.z), y: Double(p.x / p.z)) }
@@ -119,11 +126,25 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
         return l
     }
 
-    /// Where the person looking at the screen is, roughly -1…1 on each axis (x right, y down), if seen in the last
-    /// second.
+    /// Frames since the last call, how many had a face anchor, and how many had it tracked (diagnostics).
+    private var stats = (frames: 0, anchors: 0, tracked: 0)
+    func takeFaceStats() -> (frames: Int, anchors: Int, tracked: Int, lastSeenAgo: Double?) {
+        lock.withLock {
+            defer { stats = (0, 0, 0) }
+            return (stats.frames, stats.anchors, stats.tracked, viewer.map { Date().timeIntervalSince($0.at) })
+        }
+    }
+
+    /// ARKit still has a face anchor (it keeps one, "not tracked", when the face turns or moves off-axis).
+    private var faceAnchored = false
+
+    /// Where the person looking at the screen is, roughly -1…1 on each axis (x right, y down): seen in the last second,
+    /// or up to 6 s ago while ARKit still holds the face anchor (an off-axis face often drops to "not tracked").
     func viewerGaze() -> CGPoint? {
         lock.withLock {
-            guard let v = viewer, Date().timeIntervalSince(v.at) < 1 else { return nil }
+            guard let v = viewer else { return nil }
+            let age = Date().timeIntervalSince(v.at)
+            guard age < 1 || (faceAnchored && age < 6) else { return nil }
             return CGPoint(x: max(-1, min(1, v.gaze.x * 1.6)), y: max(-1, min(1, v.gaze.y * 1.6)))
         }
     }

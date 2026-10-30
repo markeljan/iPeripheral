@@ -65,6 +65,8 @@ The bridge stores only a SHA-256 of each token (`~/.config/tonypi-phone/tokens.j
 | `reset_origin` | | `{"ok":true}`; the current pose becomes the origin |
 | `detect` | `kinds` [`people`,`faces`,`hands`,`animals`,`objects`,`text`,`codes`] (default: the first five) | `objects` [{kind,label?,x,y,w,h,confidence,m,bearing_deg,elevation_deg,world?[x,y,z]}], `age_s`. `objects` = YOLO11n (80 COCO classes, `label` = class); `text` label = the text; `codes` label = `symbology: payload` |
 | `ground` | | `surface_below_m`, `lanes` [{lane: left/centre/right, clear_m, edge_m, drop_m, obstacle_m}], `age_s`: ground ahead from LiDAR heights; edge = a drop > 8 cm, obstacle = a rise > 6 cm |
+| `gaze` | | `face_tracking`, `mode` (auto/on/off), `viewer` {x,y} (the face looking at the screen, -1…1, x right, y down) or null, `eyes` {x,y} or null (wandering) |
+| `face_tracking` | `mode` `auto` (thermal governor) / `on` / `off` | same as `gaze` |
 | `motion` | | `tilt_deg` (0 upright … 90 lying), `roll_deg`, `fallen` |
 | `llm` | `model` (`lfm3-1.7b` default, `lfm3-vl-2b` for images), `prompt` + `system`, or `messages` [{role,content}]; `image` (bool: the current camera frame, VL only), `image_side` (256–1024, default 512), `max_tokens` (default 256), `thinking` (default false: the assistant turn starts with an empty `<think></think>`, as LFM3's template does for `enable_thinking=false`), `backend` (`gpu` default, or `cpu`) | `text`, `thinking` (the reasoning, when on), `model`, `backend`, `prompt_tokens`, `generated_tokens`, `prefill_tok_s`, `decode_tok_s`, `load_s`, `total_s` |
 | `models` | | `models` [{id,file,vision,downloaded,loaded,size_mb,downloading?%,error?}], `runtime` |

@@ -96,9 +96,14 @@ final class PeripheralLink {
         }
     }
 
+    /// Set by the `face_tracking` request: nil = automatic (thermal governor), true/false = forced (testing).
+    private var faceTrackingOverride: Bool?
+
     private func applyThermal() {
         let t = ProcessInfo.processInfo.thermalState
-        if t == .serious || t == .critical {
+        if let forced = faceTrackingOverride {
+            senses.setFaceTracking(forced)
+        } else if t == .serious || t == .critical {
             senses.setFaceTracking(false)
         } else if t == .nominal || t == .fair {
             senses.setFaceTracking(true)
@@ -108,12 +113,14 @@ final class PeripheralLink {
 
     /// 15 Hz: ease the eyes toward the viewer's face (or back to wandering when nobody has been seen for a second).
     private func gazeLoop() async {
+        var lastSeen = Date.distantPast
         while !Task.isCancelled {
             if let target = senses.viewerGaze() {
                 let g = gaze ?? .zero
                 gaze = CGPoint(x: g.x + (target.x - g.x) * 0.3, y: g.y + (target.y - g.y) * 0.3)
-            } else {
-                gaze = nil
+                lastSeen = Date()
+            } else if Date().timeIntervalSince(lastSeen) > 1.5 {
+                gaze = nil  // hold the last look through short tracking gaps, then wander
             }
             try? await Task.sleep(for: .milliseconds(66))
         }
@@ -315,6 +322,16 @@ final class PeripheralLink {
                             "surface_below_m": g.surfaceBelowM.map { .number($0) } ?? .null, "lanes": .array(lanes),
                             "age_s": .number(ms(g.age)),
                         ]))
+            case "face_tracking":
+                switch args["mode"]?.string {
+                case "on": faceTrackingOverride = true
+                case "off": faceTrackingOverride = false
+                default: faceTrackingOverride = nil
+                }
+                applyThermal()
+                try await c.send(.reply(rid: rid, ok: true, fields: gazeStatus()))
+            case "gaze":
+                try await c.send(.reply(rid: rid, ok: true, fields: gazeStatus()))
             case "motion":
                 let t = motion.tilt
                 try await c.send(
@@ -357,6 +374,21 @@ final class PeripheralLink {
         } catch {
             try? await c.send(.reply(rid: rid, ok: false, error: "\(error)"))
         }
+    }
+
+    private func gazeStatus() -> [String: JSONValue] {
+        let point: (CGPoint?) -> JSONValue = { p in
+            p.map { ["x": .number(cm($0.x)), "y": .number(cm($0.y))] } ?? .null
+        }
+        let s = senses.takeFaceStats()
+        return [
+            "frames": .number(Double(s.frames)), "frames_with_face": .number(Double(s.anchors)),
+            "frames_tracked": .number(Double(s.tracked)),
+            "last_seen_s": s.lastSeenAgo.map { .number(ms($0)) } ?? .null,
+            "face_tracking": .bool(senses.faceTracking),
+            "mode": .string(faceTrackingOverride.map { $0 ? "on" : "off" } ?? "auto"),
+            "viewer": point(senses.viewerGaze()), "eyes": point(gaze),
+        ]
     }
 
     // ---- on-device model -------------------------------------------------------------------------------------

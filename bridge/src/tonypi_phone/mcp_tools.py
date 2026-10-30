@@ -212,6 +212,21 @@ def build_mcp(hub: PhoneHub) -> MCPServer:
     # ---- face and voice -------------------------------------------------------------------------------------
 
     @mcp.tool()
+    async def phone_gaze() -> dict:
+        """Who is looking at Tony's screen: viewer is where their face is (x right, y down, -1..1, null = nobody),
+        eyes is where the drawn eyes are looking, face_tracking says whether the front camera is tracking."""
+        header, _ = await ask("gaze", timeout=5)
+        return fields(header)
+
+    @mcp.tool()
+    async def phone_face_tracking(mode: str = "auto") -> dict:
+        """Front-camera face tracking for the eyes: auto (off when the phone is thermally serious), on, or off."""
+        if mode not in ("auto", "on", "off"):
+            raise ToolError("mode is auto, on or off")
+        header, _ = await ask("face_tracking", timeout=5, mode=mode)
+        return fields(header)
+
+    @mcp.tool()
     async def phone_say(text: str) -> dict:
         """Speak through the phone's speaker (clearer than Tony's own). Returns when speaking starts."""
         await ask("say", text=text)

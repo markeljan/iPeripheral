@@ -99,6 +99,11 @@ image orientation, depth left/right/up/down, and person/face/hand boxes line up;
 distance; Vision person/ball detection → `phone_detect`. Closed-loop "walk to that": detect → head track → walk until
 depth < 40 cm, correcting heading from ARKit, not step counts. *Done when:* Tony walks to a ball 2 m away and stops.
 
+**Live check 2026-10-29 (phone upright on the desk):** YOLO11n found the monitor, OCR read the screen, bearings right
+(left +, right −), ground check found the desk 15 cm below and the wall at 0.75 m, LFM3-VL-2B described the scene in
+3.7 s, LFM3-1.7B ~28–30 tok/s on Metal (CPU 2.4 tok/s), sound and motion events reach the bridge. Gaze untested: the
+phone stays thermally "serious" (charging + ARKit + speech), so face tracking is off by design.
+
 **P5 — Phone as compute. [LFM3-1.7B and LFM3-VL-2B (official QAD Q4_0 GGUFs) run on the phone via llama.cpp b11988 on
 Metal; MCP `phone_llm`, `phone_look_and_ask`, and an OpenAI-compatible `/v1/chat/completions` on the bridge; benchmark
 vs the Pi still to do]** Benchmark LFM2.5-1.2B / LFM3-1.7B / LFM3-VL on the A16 (MLX Swift or llama.cpp Metal)

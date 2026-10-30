@@ -286,23 +286,25 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
         guard let d = l.depth else { throw Failure.noDepth }
         let camY = l.transform.columns.3.y
         let camXZ = SIMD2(l.transform.columns.3.x, l.transform.columns.3.z)
-        let rows = stride(from: 0.98, through: 0.40, by: -0.03).map { $0 }  // bottom of the image (near) upward (far)
+        // Bottom of the image (near) upward (far, and above the horizon, where walls and furniture show up).
+        let rows = stride(from: 0.98, through: 0.10, by: -0.03).map { $0 }
         let lanes: [(String, Double)] = [("left", 0.2), ("centre", 0.5), ("right", 0.8)]
-        // (horizontal distance, height) samples per lane, nearest first
-        var samples: [[(r: Float, y: Float)]] = Array(repeating: [], count: lanes.count)
+        // Per lane: (horizontal distance, height, below the horizon?) for three columns across the lane
+        var samples: [[(r: Float, y: Float, ground: Bool)]] = Array(repeating: [], count: lanes.count)
         DepthMap.read(d, l.confidence) { m in
             for (i, lane) in lanes.enumerated() {
                 for v in rows {
-                    let (sx, sy) = Self.sensor(lane.1, v)
-                    guard let depth = m.sample(sx, sy, radius: 2).metres else { continue }
-                    let dir = Self.ray(l, lane.1, v)
-                    guard dir.y < -0.05 else { continue }  // at or above the horizon: not ground
-                    let p = Self.worldPoint(l, lane.1, v, depth: depth)
-                    samples[i].append((simd_length(SIMD2(p.x, p.z) - camXZ), p.y))
+                    for x in [lane.1 - 0.08, lane.1, lane.1 + 0.08] {
+                        let (sx, sy) = Self.sensor(x, v)
+                        guard let depth = m.sample(sx, sy, radius: 2).metres else { continue }
+                        let p = Self.worldPoint(l, x, v, depth: depth)
+                        let below = Self.ray(l, x, v).y < -0.05
+                        samples[i].append((simd_length(SIMD2(p.x, p.z) - camXZ), p.y, below))
+                    }
                 }
             }
         }
-        let nearest = samples.flatMap { $0.prefix(3) }.map(\.y).sorted()
+        let nearest = samples.flatMap { $0.filter(\.ground).prefix(6) }.map(\.y).sorted()
         guard !nearest.isEmpty else {
             return Ground(
                 surfaceBelowM: nil, lanes: lanes.map { Lane(name: $0.0) }, age: Date().timeIntervalSince(l.at))
@@ -312,16 +314,18 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
             var r = Lane(name: lane.0)
             for s in samples[i].sorted(by: { $0.r < $1.r }) {
                 let dy = s.y - surface
+                // Anything 6–45 cm above the surface is in Tony's way (higher is overhead: a table top).
+                if dy > 0.06, dy < 0.45 {
+                    r.obstacleM = cm(Double(s.r))
+                    break
+                }
+                guard s.ground else { continue }
                 if dy < -0.08 {
                     r.edgeM = cm(Double(s.r))
                     r.dropM = cm(Double(-dy))
                     break
                 }
-                if dy > 0.06 {
-                    r.obstacleM = cm(Double(s.r))
-                    break
-                }
-                r.clearM = cm(Double(s.r))
+                if abs(dy) <= 0.06 { r.clearM = cm(Double(s.r)) }
             }
             return r
         }

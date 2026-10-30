@@ -65,7 +65,9 @@ class Bridge:
                 log.info("not forwarding %r: tonypi-voice hears Tony's own mic", text)
                 return
             try:
-                await self.voice.call("text", timeout=10, text=text, source="phone_mic")
+                r = await self.voice.call("text", timeout=10, text=text, source="phone_mic")
+                if r.get("dropped"):  # Tony's own mic heard it too (live.py waits 2.5 s to check): handled
+                    log.info("voice dropped %r: %s", text, r["dropped"])
                 return
             except TonydError as e:
                 log.info("voice text: %s; trying the agent", e)

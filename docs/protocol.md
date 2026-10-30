@@ -97,7 +97,9 @@ repeat penalty 1.1. One model is loaded at a time; `llm` requests are refused wh
   connected client gets the agent's events `{"type":…}`.
 - voice: `/run/tonypi/voice.sock` (tonypi-voice: live mode and the harness slots; never runs with the agent), JSON
   lines with `rid`. The bridge uses `say` and `text` (`source: "phone"`, live mode only) and never `attach` (that's the
-  brain's). Commands and spoken pairing codes go to voice when it's up, else to the agent.
+  brain's). Commands and spoken pairing codes go to voice when it's up, else to the agent. `text` answers after
+  ~2.5 s; `{"ok": true, "dropped": …}` means Tony's own mic heard the same words, so it's handled (no agent fallback).
+  Typed commands would use source `phone_app`. Phone speech never clears tonyd's stop latch.
 - Episodes (`recorder.py`): `~/.local/share/tonypi-phone/episodes/<time>-<label>/` with `frames/*.jpg`,
   `frames.jsonl`, `body.jsonl` (tonyd `state` + `joints` at `joints_hz`), `jobs.jsonl`, `meta.json`
   (`target_moved_m` from the tracked world positions). Auto-recording keeps 1 s of pre-roll and 1 s of tail per job.

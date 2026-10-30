@@ -291,19 +291,7 @@ final class PeripheralLink {
             case "detect":
                 let kinds = Set(args["kinds"]?.array?.compactMap(\.string) ?? Senses.defaultKinds)
                 let r = try await off { try $0.detect(kinds: kinds) }
-                let objects: [JSONValue] = r.objects.map { d in
-                    var o: [String: JSONValue] = [
-                        "kind": .string(d.kind), "x": .number(cm(d.x)), "y": .number(cm(d.y)),
-                        "w": .number(cm(d.w)), "h": .number(cm(d.h)), "confidence": .number(cm(d.confidence)),
-                        "m": d.metres.map { .number($0) } ?? .null, "bearing_deg": .number(d.bearingDeg.rounded()),
-                        "elevation_deg": .number(d.elevationDeg.rounded()),
-                    ]
-                    if let l = d.label { o["label"] = .string(l) }
-                    if let w = d.world {
-                        o["world"] = [.number(cm(Double(w.x))), .number(cm(Double(w.y))), .number(cm(Double(w.z)))]
-                    }
-                    return .object(o)
-                }
+                let objects = r.objects.map(Self.json)
                 try await c.send(
                     .reply(rid: rid, ok: true, fields: ["objects": .array(objects), "age_s": .number(ms(r.age))]))
             case "ground":
@@ -343,6 +331,8 @@ final class PeripheralLink {
                         ]))
             case "llm":
                 try await c.send(.reply(rid: rid, ok: true, fields: try await runModel(args)))
+            case "locate":
+                try await c.send(.reply(rid: rid, ok: true, fields: try await locate(args)))
             case "models":
                 try await c.send(.reply(rid: rid, ok: true, fields: modelsStatus()))
             case "model_download":
@@ -413,7 +403,8 @@ final class PeripheralLink {
         if useImage {
             guard spec.vision else { throw LinkError("\(id) has no vision; use lfm3-vl-2b") }
             let side = min(1024, max(256, args["image_side"]?.int ?? 512))  // smaller = fewer image tokens = faster
-            image = try await off { try $0.rgb(maxSide: side) }
+            let f = try await off { try $0.capture(maxSide: side) }
+            image = (f.rgb, f.width, f.height)
         }
         var options = LocalModel.Options()
         options.maxTokens = min(2048, max(1, args["max_tokens"]?.int ?? 256))
@@ -438,6 +429,50 @@ final class PeripheralLink {
             "decode_tok_s": .number((out.decodeTokensPerSecond * 10).rounded() / 10),
             "load_s": .number(ms(out.loadSeconds)), "total_s": .number(ms(out.totalSeconds)),
         ]
+    }
+
+    /// Open-vocabulary detection: LFM3-VL-2B finds whatever `target` describes ("the red mug", "my keys") and returns
+    /// boxes, which are then placed in the world from the same frame's depth and pose. Seconds, not milliseconds:
+    /// for finding something once, not for tracking it.
+    private func locate(_ args: [String: JSONValue]) async throws -> [String: JSONValue] {
+        guard let target = args["target"]?.string, !target.isEmpty else { throw LinkError("target is required") }
+        guard let spec = ModelSpec.named("lfm3-vl-2b") else { throw LinkError("no vision model") }
+        guard ProcessInfo.processInfo.thermalState != .critical else { throw LocalModel.Failure.tooHot }
+        let side = min(1024, max(256, args["image_side"]?.int ?? 768))  // grounding likes detail
+        let frame = try await off { try $0.capture(maxSide: side) }
+        // The box format is LFM3-VL's own (Liquid's grounding docs): [xmin, ymin, xmax, ymax] on a 0-1000 grid.
+        let system = """
+            When asked for bounding boxes for objects, return a valid JSON array. Each item is \
+            {"bbox_2d": [xmin, ymin, xmax, ymax], "label": "..."} with integer coordinates normalized to [0, 1000]. \
+            Return [] if none are visible.
+            """
+        var options = LocalModel.Options()
+        options.maxTokens = 400
+        options.thinking = args["thinking"]?.bool ?? false
+        llmState = "locating"
+        defer { llmState = "idle" }
+        let out = try await model.generate(
+            model: spec, messages: [("system", system), ("user", "Provide bounding boxes for \(target).")],
+            image: (frame.rgb, frame.width, frame.height), options: options)
+        let boxes = Grounding.parse(out.text).map { ($0.label, $0.x, $0.y, $0.w, $0.h) }
+        let placed = senses.place(boxes, in: frame)
+        return [
+            "target": .string(target), "objects": .array(placed.map(Self.json)), "raw": .string(out.text),
+            "prompt_tokens": .number(Double(out.promptTokens)), "total_s": .number(ms(out.totalSeconds)),
+        ]
+    }
+
+    private static func json(_ d: Senses.Detection) -> JSONValue {
+        var o: [String: JSONValue] = [
+            "kind": .string(d.kind), "x": .number(cm(d.x)), "y": .number(cm(d.y)), "w": .number(cm(d.w)),
+            "h": .number(cm(d.h)), "confidence": .number(cm(d.confidence)), "m": d.metres.map { .number($0) } ?? .null,
+            "bearing_deg": .number(d.bearingDeg.rounded()), "elevation_deg": .number(d.elevationDeg.rounded()),
+        ]
+        if let l = d.label { o["label"] = .string(l) }
+        if let w = d.world {
+            o["world"] = [.number(cm(Double(w.x))), .number(cm(Double(w.y))), .number(cm(Double(w.z)))]
+        }
+        return .object(o)
     }
 
     private func modelsStatus() -> [String: JSONValue] {

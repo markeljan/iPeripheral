@@ -68,8 +68,8 @@ def build_mcp(hub: PhoneHub) -> MCPServer:
 
     @mcp.tool()
     async def phone_detect(kinds: list[str] | None = None) -> dict:
-        """What the phone camera sees now (on-device Vision + YOLO11n on the Neural Engine). kinds: any of people,
-        faces, hands, animals, objects (80 COCO classes: ball, cup, chair, bottle, ...), text (OCR), codes (QR and
+        """What the phone camera sees now (on-device Vision + YOLO26n on the Neural Engine). kinds: any of people,
+        faces, hands, animals, objects (YOLO26n, 80 COCO classes: ball, cup, chair, bottle, ...), text (OCR), codes (QR and
         barcodes). Default: people, faces, hands, animals, objects. Each object has kind, label (object class, text
         or code payload), box x, y, w, h (0-1, top-left origin), confidence, m (distance to the box centre, LiDAR),
         bearing_deg (positive = left of Tony's heading), elevation_deg, and world [x, y, z] in phone_pose's frame."""
@@ -96,6 +96,19 @@ def build_mcp(hub: PhoneHub) -> MCPServer:
             return {"found": False, "target": target}
         best = min(objs, key=lambda o: (o.get("m") is None, o.get("m") or 0, -o["w"] * o["h"]))
         return {"found": True, "target": target, "matches": len(objs), **best}
+
+    @mcp.tool()
+    async def phone_locate(target: str, image_side: int = 768) -> dict:
+        """Find anything you can describe in words ("the red mug", "the charging cable", "the door handle") with the
+        on-device LFM3-VL-2B vision model: open-vocabulary, unlike phone_detect/phone_find's 80 fixed classes, but
+        takes seconds. Each match comes back like phone_detect's objects (box, m, bearing_deg, world), placed from
+        the depth and pose of the moment the picture was taken. Use it to find a target once, then phone_find or
+        phone_pose to track it while moving."""
+        header, _ = await ask("locate", timeout=LLM_TIMEOUT_S, target=target,
+                              image_side=max(256, min(1024, int(image_side))))
+        out = fields(header)
+        out["found"] = bool(out.get("objects"))
+        return out
 
     @mcp.tool()
     async def phone_read_text() -> dict:

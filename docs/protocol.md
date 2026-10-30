@@ -63,12 +63,13 @@ The bridge stores only a SHA-256 of each token (`~/.config/tonypi-phone/tokens.j
 | `depth` | `points` [[x,y],…] and/or `grid` [cols,rows] (1–16) | `points` [{x,y,m,confidence 0–2}], `grid` [[m\|null]] row 0 = top, nearest (5th percentile) per cell |
 | `pose` | | `x,y,z` m (y up, origin where tracking started), `yaw_deg` (+ = turned left), `pitch_deg`, `tracking` (`normal`, `limited:<reason>`, `not_available`), `age_s` |
 | `reset_origin` | | `{"ok":true}`; the current pose becomes the origin |
-| `detect` | `kinds` [`people`,`faces`,`hands`,`animals`,`objects`,`text`,`codes`] (default: the first five) | `objects` [{kind,label?,x,y,w,h,confidence,m,bearing_deg,elevation_deg,world?[x,y,z]}], `age_s`. `objects` = YOLO11n (80 COCO classes, `label` = class); `text` label = the text; `codes` label = `symbology: payload` |
+| `detect` | `kinds` [`people`,`faces`,`hands`,`animals`,`objects`,`text`,`codes`] (default: the first five) | `objects` [{kind,label?,x,y,w,h,confidence,m,bearing_deg,elevation_deg,world?[x,y,z]}], `age_s`. `objects` = YOLO26n (80 COCO classes, NMS-free end-to-end head, `label` = class; `person` is left to the human detector); `text` label = the text; `codes` label = `symbology: payload` |
 | `ground` | | `surface_below_m`, `lanes` [{lane: left/centre/right, clear_m, edge_m, drop_m, obstacle_m}], `age_s`: ground ahead from LiDAR heights; edge = a drop > 8 cm, obstacle = a rise > 6 cm |
 | `gaze` | | `face_tracking`, `mode` (auto/on/off), `viewer` {x,y} (the face looking at the screen, -1…1, x right, y down) or null, `eyes` {x,y} or null (wandering) |
 | `face_tracking` | `mode` `auto` (thermal governor) / `on` / `off` | same as `gaze` |
 | `motion` | | `tilt_deg` (0 upright … 90 lying), `roll_deg`, `fallen` |
 | `llm` | `model` (`lfm3-1.7b` default, `lfm3-vl-2b` for images), `prompt` + `system`, or `messages` [{role,content}]; `image` (bool: the current camera frame, VL only), `image_side` (256–1024, default 512), `max_tokens` (default 256), `thinking` (default false: the assistant turn starts with an empty `<think></think>`, as LFM3's template does for `enable_thinking=false`), `backend` (`gpu` default, or `cpu`) | `text`, `thinking` (the reasoning, when on), `model`, `backend`, `prompt_tokens`, `generated_tokens`, `prefill_tok_s`, `decode_tok_s`, `load_s`, `total_s` |
+| `locate` | `target` (any description), `image_side` (default 768), `thinking` (default false) | `objects` [{kind: `located`, label, x,y,w,h, m, bearing_deg, elevation_deg, world}], `raw` (the model's answer), `prompt_tokens`, `total_s`. LFM3-VL-2B grounding: Liquid's `bbox_2d` JSON on a 0–1000 grid, placed with the depth and pose of the captured frame |
 | `models` | | `models` [{id,file,vision,downloaded,loaded,size_mb,downloading?%,error?}], `runtime` |
 | `model_download` | `model` | starts the download (Hugging Face, ~1 GB); same reply as `models` |
 | `model_unload` | | frees the loaded model |
@@ -91,7 +92,7 @@ repeat penalty 1.1. One model is loaded at a time; `llm` requests are refused wh
 - agent: `/run/tonypi/agent.sock`, JSON lines; send `{"text":"…"}` (command) or `{"op":"say","text":"…"}`; every
   connected client gets the agent's events `{"type":…}`.
 - MCP: `http://127.0.0.1:8767/mcp` (Streamable HTTP, localhost only): `phone_status`, `phone_snapshot`,
-  `phone_detect`, `phone_find`, `phone_read_text`, `phone_depth_at`, `phone_obstacles`, `phone_ground_check`,
+  `phone_detect`, `phone_find`, `phone_locate`, `phone_read_text`, `phone_depth_at`, `phone_obstacles`, `phone_ground_check`,
   `phone_pose` (from the 10 Hz stream), `phone_reset_origin`, `phone_motion`, `phone_events`, `phone_llm`,
   `phone_look_and_ask`, `phone_models`, `phone_model_download`, `phone_say`, `set_face`.
 - OpenAI-compatible: `POST http://127.0.0.1:8767/v1/chat/completions` (non-streaming, text) and `GET /v1/models`,

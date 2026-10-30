@@ -93,3 +93,18 @@ import Testing
     #expect(l.hear("stop stop Tony wave", isFinal: true) == .none)
     #expect(l.hear("Freeze!", isFinal: true) == .stop)  // a new segment
 }
+
+@Test func groundingParsesLFMBoxes() {
+    let text = """
+        Here you go:
+        ```json
+        [{"bbox_2d": [100, 200, 300, 600], "label": "red mug"}, {"bbox_2d": [500, 500, 400, 900], "label": "bad"}]
+        ```
+        """
+    let boxes = Grounding.parse(text)  // the second box has xmax < xmin and is dropped
+    #expect(boxes.count == 1 && boxes[0].label == "red mug")
+    #expect(abs(boxes[0].x - 0.1) < 1e-9 && abs(boxes[0].y - 0.2) < 1e-9)
+    #expect(abs(boxes[0].w - 0.2) < 1e-9 && abs(boxes[0].h - 0.4) < 1e-9)
+    #expect(Grounding.parse("[]").isEmpty)
+    #expect(Grounding.parse("I can't see one.").isEmpty)
+}

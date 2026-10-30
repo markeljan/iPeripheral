@@ -175,7 +175,7 @@ async def test_snapshot_request_over_binary_frame(rig):
                          "phone_obstacles", "phone_pose", "phone_reset_origin", "phone_detect", "phone_find",
                          "phone_read_text", "phone_ground_check", "phone_motion", "phone_events", "phone_llm",
                          "phone_look_and_ask", "phone_models", "phone_model_download", "phone_gaze",
-                         "phone_face_tracking"}
+                         "phone_face_tracking", "phone_locate"}
 
 
 async def test_newer_phone_replaces_older(rig):

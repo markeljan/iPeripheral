@@ -16,7 +16,8 @@ detection, ground/edge check, IMU, mic, sound events), its face, and a small on-
 - `deploy/` systemd unit, Bonjour advert, `install.sh` (rsync + uv sync + restart on `tonypi`).
 - `scripts/fetch-vendor.sh` (run by build-and-install) puts pinned llama.cpp into `Vendor/` (gitignored, device slice
   only, so Simulator builds compile a stub via `canImport(llama)`) and runs `scripts/export-yolo.sh` for
-  `App/Models/yolo11n.mlpackage` (gitignored, AGPL-3.0 Ultralytics model; the app works without it).
+  `App/Models/yolo26n.mlpackage` (gitignored, AGPL-3.0 Ultralytics model, NMS-free head parsed in `Senses`; the app
+  works without it). Open-vocabulary finding (`locate`) is LFM3-VL-2B grounding, parsed by `TonyLink.Grounding`.
 - `scripts/phone-mcp.py TOOL [k=v ...]` calls one bridge MCP tool (`uv run --project bridge scripts/phone-mcp.py list`).
 - `scripts/build-and-install.sh [--console]` builds, installs and launches on the iPhone; `scripts/team.sh` writes the
   signing team into `App/Config/Local.xcconfig` (gitignored).

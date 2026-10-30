@@ -183,25 +183,6 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
             age: Date().timeIntervalSince(l.at))
     }
 
-    /// The latest frame as packed RGB bytes (for the on-device vision model).
-    func rgb(maxSide: Int) throws -> (rgb: [UInt8], width: Int, height: Int) {
-        let l = try current()
-        let image = portrait(l, maxSide: maxSide)
-        let w = Int(image.extent.width.rounded(.down))
-        let h = Int(image.extent.height.rounded(.down))
-        var rgba = [UInt8](repeating: 0, count: w * h * 4)
-        ci.render(
-            image, toBitmap: &rgba, rowBytes: w * 4, bounds: CGRect(x: 0, y: 0, width: w, height: h), format: .RGBA8,
-            colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
-        var rgb = [UInt8](repeating: 0, count: w * h * 3)
-        for i in 0..<(w * h) {
-            rgb[i * 3] = rgba[i * 4]
-            rgb[i * 3 + 1] = rgba[i * 4 + 1]
-            rgb[i * 3 + 2] = rgba[i * 4 + 2]
-        }
-        return (rgb, w, h)
-    }
-
     // ---- geometry -----------------------------------------------------------------------------------------------
 
     /// Portrait (x, y) → landscape sensor (sx, sy); the sensor image is the portrait image turned 90° anticlockwise.
@@ -389,20 +370,49 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
     static let defaultKinds = ["people", "faces", "hands", "animals", "objects"]
     static let detectKinds = defaultKinds + ["text", "codes"]
 
-    /// YOLO11n (80 COCO classes) compiled into the app from App/Models, on the Neural Engine. Nil when not bundled.
-    nonisolated(unsafe) private static let objectModel: VNCoreMLModel? = {
+    /// YOLO26n (80 COCO classes, NMS-free end-to-end head) compiled into the app from App/Models, on the Neural
+    /// Engine; class names come from the model's metadata. Nil when not bundled (scripts/export-yolo.sh).
+    nonisolated(unsafe) private static let objectModel: (model: VNCoreMLModel, names: [String])? = {
         let config = MLModelConfiguration()
         config.computeUnits = .all
-        for name in ["yolo11n", "YOLOv3TinyFP16"] {
-            if let url = Bundle.main.url(forResource: name, withExtension: "mlmodelc"),
-                let m = try? MLModel(contentsOf: url, configuration: config), let v = try? VNCoreMLModel(for: m)
-            {
-                return v
-            }
-        }
-        return nil
+        guard let url = Bundle.main.url(forResource: "yolo26n", withExtension: "mlmodelc"),
+            let m = try? MLModel(contentsOf: url, configuration: config), let v = try? VNCoreMLModel(for: m)
+        else { return nil }
+        // Ultralytics writes names as a Python dict literal: "{0: 'person', 1: 'bicycle', ...}"
+        let meta = m.modelDescription.metadata[.creatorDefinedKey] as? [String: String]
+        let names = (meta?["names"] ?? "").matches(of: /'([^']*)'/).map { String($0.1) }
+        return (v, names)
     }()
     static var hasObjectModel: Bool { objectModel != nil }
+    static let objectThreshold: Float = 0.35
+
+    /// YOLO26 end-to-end output [1, 300, 6]: x1, y1, x2, y2 in the 640-px (scale-filled, portrait) input, score,
+    /// class. Already de-duplicated, so no NMS.
+    private static func yoloObjects(_ results: [VNObservation]?) -> [Detection] {
+        guard let model = objectModel,
+            let a = results?.compactMap({ $0 as? VNCoreMLFeatureValueObservation }).first?.featureValue.multiArrayValue,
+            a.shape.count == 3, a.shape[2].intValue >= 6
+        else { return [] }
+        let side: Float = 640
+        var out: [Detection] = []
+        for i in 0..<a.shape[1].intValue {
+            func v(_ j: Int) -> Float { a[[0, NSNumber(value: i), NSNumber(value: j)]].floatValue }
+            let score = v(4)
+            guard score >= objectThreshold else { continue }
+            let cls = Int(v(5))
+            let label = cls < model.names.count ? model.names[cls] : "class \(cls)"
+            if label == "person" { continue }  // people come from Vision's dedicated (better) human detector
+            let x1 = max(0, v(0) / side)
+            let y1 = max(0, v(1) / side)
+            let x2 = min(1, v(2) / side)
+            let y2 = min(1, v(3) / side)
+            out.append(
+                Detection(
+                    kind: "objects", label: label, x: Double(x1), y: Double(y1), w: Double(x2 - x1),
+                    h: Double(y2 - y1), confidence: Double(score)))
+        }
+        return out
+    }
 
     /// What the camera sees in the latest frame, with distance, bearing and world position when depth has it.
     func detect(kinds: Set<String>) throws -> (objects: [Detection], age: Double) {
@@ -421,7 +431,7 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
             requests.append(("hands", r))
         }
         if kinds.contains("animals") { requests.append(("animals", VNRecognizeAnimalsRequest())) }
-        if kinds.contains("objects"), let model = Self.objectModel {
+        if kinds.contains("objects"), let model = Self.objectModel?.model {
             let r = VNCoreMLRequest(model: model)
             r.imageCropAndScaleOption = .scaleFill
             requests.append(("objects", r))
@@ -436,13 +446,12 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
         try handler.perform(requests.map(\.1))
         var out: [Detection] = []
         for (kind, req) in requests {
+            if kind == "objects" {
+                out += Self.yoloObjects(req.results)
+                continue
+            }
             for obs in req.results ?? [] {
                 guard let box = Self.box(obs) else { continue }
-                if kind == "objects", let o = obs as? VNRecognizedObjectObservation,
-                    o.labels.first?.identifier == "person"
-                {
-                    continue  // people come from the dedicated (better) human detector
-                }
                 // Vision boxes are normalized with the origin bottom-left; ours is top-left.
                 out.append(
                     Detection(
@@ -450,6 +459,12 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
                         h: box.height, confidence: Double(obs.confidence)))
             }
         }
+        Self.place(&out, in: l)
+        return (out, age)
+    }
+
+    /// Adds bearing and elevation, and (with depth) distance and world position, to boxes found in frame `l`.
+    private static func place(_ out: inout [Detection], in l: Latest) {
         for i in out.indices {
             let cx = out[i].x + out[i].w / 2
             let cy = out[i].y + out[i].h / 2
@@ -466,7 +481,45 @@ final class Senses: NSObject, ARSessionDelegate, @unchecked Sendable {
                 }
             }
         }
-        return (out, age)
+    }
+
+    // ---- frames for the on-device vision model -----------------------------------------------------------------
+
+    /// One frame kept for the vision model: its RGB pixels plus the depth and pose of that same moment, so boxes the
+    /// model finds seconds later are placed where things were when the picture was taken.
+    struct Frame: @unchecked Sendable {
+        fileprivate let latest: Latest
+        let rgb: [UInt8]
+        let width: Int
+        let height: Int
+    }
+
+    func capture(maxSide: Int) throws -> Frame {
+        let l = try current()
+        let image = portrait(l, maxSide: maxSide)
+        let w = Int(image.extent.width.rounded(.down))
+        let h = Int(image.extent.height.rounded(.down))
+        var rgba = [UInt8](repeating: 0, count: w * h * 4)
+        ci.render(
+            image, toBitmap: &rgba, rowBytes: w * 4, bounds: CGRect(x: 0, y: 0, width: w, height: h), format: .RGBA8,
+            colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        var rgb = [UInt8](repeating: 0, count: w * h * 3)
+        for i in 0..<(w * h) {
+            rgb[i * 3] = rgba[i * 4]
+            rgb[i * 3 + 1] = rgba[i * 4 + 1]
+            rgb[i * 3 + 2] = rgba[i * 4 + 2]
+        }
+        return Frame(latest: l, rgb: rgb, width: w, height: h)
+    }
+
+    /// Boxes (normalized portrait, top-left origin) that something else (the vision model) found in `frame`, placed
+    /// in the world the way `detect` places its own.
+    func place(_ boxes: [(label: String, x: Double, y: Double, w: Double, h: Double)], in frame: Frame) -> [Detection] {
+        var out = boxes.map {
+            Detection(kind: "located", label: $0.label, x: $0.x, y: $0.y, w: $0.w, h: $0.h, confidence: 1)
+        }
+        Self.place(&out, in: frame.latest)
+        return out
     }
 
     private static func label(_ obs: VNObservation) -> String? {

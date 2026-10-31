@@ -1,4 +1,3 @@
-// Signing for the free Personal Team. Put your team ID in App/Config/Local.xcconfig (gitignored):
-//   DEVELOPMENT_TEAM = ABCDE12345
-// scripts/team.sh writes it from the signing identity Xcode created.
+// Set your own signing team and unique bundle identifier in the ignored Local.xcconfig.
+PRODUCT_BUNDLE_IDENTIFIER = org.example.iperipheral
 #include? "Local.xcconfig"

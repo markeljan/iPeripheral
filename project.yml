@@ -28,7 +28,6 @@ targets:
       - package: TonyLink
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: org.example.iperipheral
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: NO

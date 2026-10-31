@@ -24,9 +24,10 @@ xcodebuild -project iPeripheral.xcodeproj -scheme iPeripheral -configuration Deb
   -destination "id=$DEVICE" -derivedDataPath build/dd -allowProvisioningUpdates build \
   | (command -v xcbeautify >/dev/null && xcbeautify --quiet || cat)
 APP="build/dd/Build/Products/Debug-iphoneos/iPeripheral.app"
+BUNDLE_ID="$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$APP/Info.plist")"
 xcrun devicectl device install app --device "$DEVICE" "$APP"
 if [ "${1:-}" = "--console" ]; then
-  xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --console org.example.iperipheral -- ${APP_ARGS:-}
+  xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --console "$BUNDLE_ID" -- ${APP_ARGS:-}
 else
-  xcrun devicectl device process launch --device "$DEVICE" --terminate-existing org.example.iperipheral -- ${APP_ARGS:-}
+  xcrun devicectl device process launch --device "$DEVICE" --terminate-existing "$BUNDLE_ID" -- ${APP_ARGS:-}
 fi

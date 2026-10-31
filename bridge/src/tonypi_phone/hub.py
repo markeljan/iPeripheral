@@ -42,7 +42,7 @@ class PhoneHub:
         self.events: collections.deque[dict] = collections.deque(maxlen=100)  # falls, impacts, sounds; newest last
         self.on_frame: Callable[[dict, bytes], None] = lambda header, jpeg: None  # streamed camera frames
         self._rids = itertools.count(1)
-        self._pending: dict[int, asyncio.Future] = {}
+        self._pending: dict[int, tuple[object, asyncio.Future]] = {}
 
     @property
     def connected(self) -> bool:
@@ -53,16 +53,22 @@ class PhoneHub:
         old = self.ws
         self.ws, self.device, self.status, self.pose = ws, device, {}, None
         if old is not None and old is not ws:
+            self._fail_pending(old)
             await old.close(4000, "replaced by a newer connection")
 
     def detach(self, ws) -> None:
         if self.ws is not ws:
             return
         self.ws = None
-        for fut in self._pending.values():
+        self._fail_pending(ws)
+
+    def _fail_pending(self, ws) -> None:
+        for rid, (owner, fut) in list(self._pending.items()):
+            if owner is not ws:
+                continue
             if not fut.done():
                 fut.set_exception(PhoneError("phone disconnected"))
-        self._pending.clear()
+            self._pending.pop(rid, None)
 
     async def push(self, msg: dict) -> None:
         """Best effort: a phone that just left is not an error."""
@@ -80,7 +86,7 @@ class PhoneHub:
             raise PhoneError("Tony's phone is not connected")
         rid = next(self._rids)
         fut = asyncio.get_running_loop().create_future()
-        self._pending[rid] = fut
+        self._pending[rid] = (ws, fut)
         try:
             await ws.send(json.dumps({"type": "request", "rid": rid, "op": op, **args}))
             header, payload = await asyncio.wait_for(fut, timeout)
@@ -103,7 +109,9 @@ class PhoneHub:
         return [{k: v for k, v in e.items() if k not in ("type", "t")} | {"ago_s": round(now - e["t"], 1)}
                 for e in self.events if now - e["t"] <= since_s and (kinds is None or e.get("kind") in kinds)]
 
-    def on_reply(self, header: dict, payload: bytes | None = None) -> None:
-        fut = self._pending.get(header.get("rid"))
-        if fut is not None and not fut.done():
-            fut.set_result((header, payload))
+    def on_reply(self, ws, header: dict, payload: bytes | None = None) -> None:
+        pending = self._pending.get(header.get("rid"))
+        if pending is not None:
+            owner, fut = pending
+            if owner is ws and not fut.done():
+                fut.set_result((header, payload))

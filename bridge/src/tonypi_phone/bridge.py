@@ -102,7 +102,7 @@ class Bridge:
         try:
             async for raw in ws:
                 try:
-                    await self._on_phone(raw)
+                    await self._on_phone(ws, raw)
                 except Exception:
                     log.exception("bad phone message")
         except ConnectionClosed:
@@ -150,11 +150,11 @@ class Bridge:
 
     # ---- phone → robot ------------------------------------------------------------------------------------------
 
-    async def _on_phone(self, raw: str | bytes) -> None:
+    async def _on_phone(self, ws, raw: str | bytes) -> None:
         if isinstance(raw, bytes):
             header, payload = unpack_frame(raw)
             if header.get("type") == "reply":
-                self.hub.on_reply(header, payload)
+                self.hub.on_reply(ws, header, payload)
             elif header.get("type") == "frame":
                 self.hub.on_frame(header, payload)
             return
@@ -184,7 +184,7 @@ class Bridge:
         elif t == "status":
             self.hub.status = {k: v for k, v in msg.items() if k != "type"}
         elif t == "reply":
-            self.hub.on_reply(msg)
+            self.hub.on_reply(ws, msg)
 
     async def _push_vocabulary(self) -> None:
         """Skill names, so the phone's speech recognition expects them ("step in place", not "step and place")."""
